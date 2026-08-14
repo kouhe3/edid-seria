@@ -20,10 +20,15 @@ pub enum TimingKind {
 
 /// A user-requested resolution, before timing computation.
 #[derive(Copy, Clone, Debug, PartialEq)]
+/// A user-requested resolution, before timing computation.
 pub struct ResolutionSpec {
+    /// Horizontal active pixels.
     pub width: u32,
+    /// Vertical active lines.
     pub height: u32,
+    /// Refresh rate in Hz.
     pub refresh: f64,
+    /// PC (CVT-RB2) or HDTV (CEA preset) timing style.
     pub kind: TimingKind,
 }
 

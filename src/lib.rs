@@ -1,4 +1,7 @@
 //! EDID parsing and serialization.
+
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
 //!
 //! Platform-independent core: detailed timing model, CVT computation,
 //! EDID base-block read/write, and the resolution → EDID serialization

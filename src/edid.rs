@@ -1,4 +1,5 @@
-// EDID detailed resolution: binary read/write (18-byte block)
+//! EDID base-block read/write: the 18-byte detailed timing descriptor
+//! (DTD), slot classification, and checksum handling.
 //
 // EDID detailed timing descriptor (bytes 0-17):
 //   [0-1]   Pixel clock (kHz/10, LE)
@@ -28,6 +29,7 @@
 use crate::timing::DetailedTiming;
 
 const EDID_DESCRIPTOR_LEN: usize = 18;
+/// Size of one EDID block in bytes.
 pub const EDID_BLOCK_SIZE: usize = 128;
 const DETAILED_SLOTS: usize = 4;
 pub(crate) const DETAILED_START: usize = 54;
@@ -43,8 +45,10 @@ enum SlotKind {
     Descriptor,
 }
 
+/// One raw EDID block (base block or extension block).
 #[derive(Clone)]
 pub struct EdidBlock {
+    /// The raw 128 EDID bytes.
     pub raw: [u8; EDID_BLOCK_SIZE],
 }
 
@@ -290,6 +294,7 @@ impl EdidBlock {
         self.raw[127] = (256u16 - sum as u16) as u8;
     }
 
+    /// The raw 128 EDID bytes as a slice.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw

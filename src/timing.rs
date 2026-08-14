@@ -1,40 +1,60 @@
-// Detailed timing data and preset tables
+//! Detailed timing model: the [`DetailedTiming`] type, PC/HDTV preset
+//! tables, CVT/CVT-RB/CVT-RB2 timing computation, and DTD field limits.
 
+/// A complete progressive display timing, as held in an EDID DTD or
+/// computed by the CVT formulas.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DetailedTiming {
+    /// Horizontal active pixels.
     pub h_active: u32,
+    /// Vertical active lines.
     pub v_active: u32,
+    /// Horizontal front porch (pixels).
     pub h_front: u32,
+    /// Horizontal sync pulse width (pixels).
     pub h_sync: u32,
+    /// Horizontal back porch (pixels).
     pub h_back: u32,
+    /// Vertical front porch (lines).
     pub v_front: u32,
+    /// Vertical sync pulse width (lines).
     pub v_sync: u32,
+    /// Vertical back porch (lines).
     pub v_back: u32,
     /// Horizontal border in pixels (DTD byte 15); blanking includes 2× this.
     pub h_border: u32,
     /// Vertical border in lines (DTD byte 16); blanking includes 2× this.
     pub v_border: u32,
+    /// Pixel clock in kHz.
     pub pixel_clock_khz: u32,
+    /// Horizontal sync polarity (`true` = positive).
     pub h_pol: bool,
+    /// Vertical sync polarity (`true` = positive).
     pub v_pol: bool,
+    /// Refresh rate in Hz, as computed from clock and totals.
     pub v_rate: f64,
 }
 
 impl DetailedTiming {
+    /// Horizontal active pixels.
     #[must_use]
     pub fn width(&self) -> u32 {
         self.h_active
     }
+    /// Vertical active lines.
     #[must_use]
     pub fn height(&self) -> u32 {
         self.v_active
     }
 
+    /// Human-readable label, e.g. `"1920x1080 @ 60Hz"`.
     #[must_use]
     pub fn label(&self) -> String {
         format!("{}x{} @ {:.0}Hz", self.h_active, self.v_active, self.v_rate)
     }
 
+    /// Look up a standard preset timing by resolution and refresh rate
+    /// (within 0.5 Hz); returns `None` when no preset matches.
     #[must_use]
     pub fn compute_blanking(width: u32, height: u32, refresh: f64) -> Option<DetailedTiming> {
         let presets = all_presets();
@@ -732,11 +752,16 @@ const RB_V2_H_BLANK: f64 = 80.0;
 const RB_V2_V_SYNC: f64 = 8.0;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Which CVT variant to use for timing computation.
 pub enum TimingFormula {
+    /// Do not compute: used to mark timings entered by hand.
     Manual,
-    CVT,    // CVT 1.1 normal blanking
-    CVTRB,  // CVT 1.1 reduced blanking
-    CVTRB2, // CVT 1.2 reduced blanking (recommended)
+    /// CVT 1.1 with normal blanking.
+    CVT,
+    /// CVT 1.1 with reduced blanking.
+    CVTRB,
+    /// CVT 1.2 with reduced blanking v2 (recommended for PC monitors).
+    CVTRB2,
 }
 
 /// Compute timing via the CVT formula.
