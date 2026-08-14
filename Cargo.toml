@@ -1,0 +1,8 @@
+[package]
+name = "edid-seria"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "EDID parsing and serialization for CRU: detailed timings, CVT, EDID block I/O"
+
+[dependencies]
