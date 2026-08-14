@@ -43,12 +43,14 @@ enum SlotKind {
     Descriptor,
 }
 
+#[derive(Clone)]
 pub struct EdidBlock {
     pub raw: [u8; EDID_BLOCK_SIZE],
 }
 
 impl EdidBlock {
     /// Create default minimal EDID block
+    #[must_use]
     pub fn new_default() -> Self {
         let mut raw = [0u8; EDID_BLOCK_SIZE];
         // EDID header: 00 FF FF FF FF FF FF 00
@@ -65,6 +67,7 @@ impl EdidBlock {
     }
 
     /// Parse EDID from bytes
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < EDID_BLOCK_SIZE {
             return None;
@@ -75,6 +78,7 @@ impl EdidBlock {
     }
 
     /// Read detailed timing from slot (0-3)
+    #[must_use]
     pub fn read_detailed(&self, slot: usize) -> Option<DetailedTiming> {
         if slot >= DETAILED_SLOTS {
             return None;
@@ -147,7 +151,16 @@ impl EdidBlock {
     }
 
     /// Write detailed timing to slot
+    ///
+    /// The timing must fit the DTD field limits of E-EDID 1.4 §3.10.2
+    /// (see [`crate::timing::dtd_fits`]); debug builds panic otherwise,
+    /// release builds truncate silently. The serialization pipeline
+    /// pre-validates via [`crate::serialize::serialize_resolutions`].
     pub fn write_detailed(&mut self, slot: usize, t: &DetailedTiming) {
+        debug_assert!(
+            crate::timing::dtd_fits(t),
+            "timing exceeds DTD field limits: {t:?}"
+        );
         if slot >= DETAILED_SLOTS {
             return;
         }
@@ -264,6 +277,7 @@ impl EdidBlock {
     }
 
     /// Get all detailed timings from this block
+    #[must_use]
     pub fn detailed_timings(&self) -> Vec<DetailedTiming> {
         (0..DETAILED_SLOTS)
             .filter_map(|slot| self.read_detailed(slot))
@@ -276,6 +290,7 @@ impl EdidBlock {
         self.raw[127] = (256u16 - sum as u16) as u8;
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
     }

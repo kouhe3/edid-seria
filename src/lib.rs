@@ -1,8 +1,8 @@
-//! EDID parsing and serialization for CRU-RS.
+//! EDID parsing and serialization.
 //!
 //! Platform-independent core: detailed timing model, CVT computation,
 //! EDID base-block read/write, and the resolution → EDID serialization
-//! pipeline used by the CRU-RS GUI.
+//! pipeline.
 //!
 //! No OS dependencies; the registry and elevation glue lives in `cru-rs`.
 
@@ -12,4 +12,4 @@ pub mod timing;
 
 pub use edid::{EDID_BLOCK_SIZE, EdidBlock};
 pub use serialize::{ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions};
-pub use timing::{DetailedTiming, TimingFormula, all_presets, compute_cvt};
+pub use timing::{DetailedTiming, TimingFormula, all_presets, compute_cvt, dtd_fits};

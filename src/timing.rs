@@ -21,17 +21,21 @@ pub struct DetailedTiming {
 }
 
 impl DetailedTiming {
+    #[must_use]
     pub fn width(&self) -> u32 {
         self.h_active
     }
+    #[must_use]
     pub fn height(&self) -> u32 {
         self.v_active
     }
 
+    #[must_use]
     pub fn label(&self) -> String {
         format!("{}x{} @ {:.0}Hz", self.h_active, self.v_active, self.v_rate)
     }
 
+    #[must_use]
     pub fn compute_blanking(width: u32, height: u32, refresh: f64) -> Option<DetailedTiming> {
         let presets = all_presets();
         presets
@@ -43,7 +47,22 @@ impl DetailedTiming {
     }
 }
 
-/// PC preset timings ported from CRU DetailedResolutionClass::AutomaticPC[]
+/// EDID DTD field limits (E-EDID 1.4 §3.10.2). A timing that exceeds any of
+/// them would be silently truncated by the low-level writer, so reject it.
+#[must_use]
+pub fn dtd_fits(t: &DetailedTiming) -> bool {
+    t.h_active <= 4095
+        && t.v_active <= 4095
+        && t.h_front + t.h_sync + t.h_back + 2 * t.h_border <= 4095 // HBlank: 12 bits
+        && t.v_front + t.v_sync + t.v_back + 2 * t.v_border <= 4095 // VBlank: 12 bits
+        && t.h_front <= 1023
+        && t.h_sync <= 1023
+        && t.v_front <= 63
+        && t.v_sync <= 63
+        && t.h_border <= 255
+        && t.v_border <= 255
+        && t.pixel_clock_khz <= 655_350 // 655.35 MHz: 16 bits of 10 kHz
+}
 fn pc_presets() -> Vec<DetailedTiming> {
     vec![
         DetailedTiming {
@@ -667,10 +686,16 @@ fn hdtv_presets() -> Vec<DetailedTiming> {
     ]
 }
 
-pub fn all_presets() -> Vec<DetailedTiming> {
-    let mut v = pc_presets();
-    v.extend(hdtv_presets());
-    v
+/// All PC and HDTV preset timings, built once and returned as a static slice.
+#[must_use]
+pub fn all_presets() -> &'static [DetailedTiming] {
+    use std::sync::LazyLock;
+    static PRESETS: LazyLock<Vec<DetailedTiming>> = LazyLock::new(|| {
+        let mut v = pc_presets();
+        v.extend(hdtv_presets());
+        v
+    });
+    &PRESETS
 }
 
 // ---------------------------------------------------------------------------
@@ -716,14 +741,16 @@ pub enum TimingFormula {
 
 /// Compute timing via the CVT formula.
 ///
-/// Returns None if the requested parameters are out of range.
+/// Returns `None` if the requested parameters are out of range
+/// (`freq` must be in (0, 1000] Hz, or the formula degenerates).
+#[must_use]
 pub fn compute_cvt(
     h_pixels: u32,
     v_lines: u32,
     freq: f64,
     formula: TimingFormula,
 ) -> Option<DetailedTiming> {
-    if h_pixels == 0 || v_lines == 0 || freq <= 0.0 {
+    if h_pixels == 0 || v_lines == 0 || freq <= 0.0 || freq > 1000.0 {
         return None;
     }
     let reduced = match formula {
@@ -841,8 +868,6 @@ pub fn compute_cvt(
             )
         };
 
-    let _act_h_freq = 1000.0 * act_pixel_freq / total_pixels;
-
     // H-sync rounding
     let h_sync_rnd = if reduced != 0 {
         RB_H_SYNC as f64
@@ -881,14 +906,14 @@ pub fn compute_cvt(
 /// Determine VSync width based on aspect ratio (CVT 1.1 table)
 fn vsync_lines(h_px: u32, v_lines: u32, cell_gran: f64) -> f64 {
     let v = v_lines as f64;
-    let ratios: [(f64, f64, f64); 5] = [
-        (4.0 / 3.0, 4.0, 0.0),
-        (16.0 / 9.0, 5.0, 0.0),
-        (16.0 / 10.0, 6.0, 0.0),
-        (5.0 / 4.0, 7.0, 0.0),
-        (15.0 / 9.0, 7.0, 0.0),
+    let ratios: [(f64, f64); 5] = [
+        (4.0 / 3.0, 4.0),
+        (16.0 / 9.0, 5.0),
+        (16.0 / 10.0, 6.0),
+        (5.0 / 4.0, 7.0),
+        (15.0 / 9.0, 7.0),
     ];
-    for &(ratio, vsync, _) in &ratios {
+    for &(ratio, vsync) in &ratios {
         let expected = cell_gran * (v * ratio / cell_gran).floor();
         if (h_px as f64 - expected).abs() < 0.5 {
             return vsync;
@@ -990,5 +1015,8 @@ mod tests {
     fn cvt_rejects_zero() {
         assert!(compute_cvt(0, 1080, 60.0, TimingFormula::CVT).is_none());
         assert!(compute_cvt(1920, 0, 60.0, TimingFormula::CVT).is_none());
+        assert!(compute_cvt(1920, 1080, 0.0, TimingFormula::CVT).is_none());
+        assert!(compute_cvt(1920, 1080, 5000.0, TimingFormula::CVT).is_none());
+        assert!(compute_cvt(1920, 1080, 60.0, TimingFormula::Manual).is_none());
     }
 }

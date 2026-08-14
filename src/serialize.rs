@@ -7,7 +7,7 @@
 //! checksum of every block, and returns the complete EDID binary.
 
 use crate::edid::{EDID_BLOCK_SIZE, EdidBlock};
-use crate::timing::{DetailedTiming, TimingFormula, compute_cvt};
+use crate::timing::{DetailedTiming, TimingFormula, compute_cvt, dtd_fits};
 
 /// PC vs HDTV timing style. Mirrors the GUI's mode selector.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -43,10 +43,11 @@ pub struct SerializedEdid {
 ///
 /// `existing` is the display's current EDID (registry override or original
 /// EDID); `None` or data shorter than one block starts from a minimal default
-/// block. The base block's detailed-timing slots are rewritten, monitor
-/// descriptors are preserved, every block's checksum is fixed, and the
-/// extension count byte is normalized to the number of blocks actually
-/// present.
+/// block. A trailing partial block (length not a multiple of 128) is dropped.
+/// The base block's detailed-timing slots are rewritten, monitor descriptors
+/// are preserved, every block's checksum is fixed, and the extension count
+/// byte is normalized to the number of blocks actually present.
+#[must_use]
 pub fn serialize_resolutions(
     existing: Option<&[u8]>,
     resolutions: &[ResolutionSpec],
@@ -90,22 +91,6 @@ fn timing_for(spec: &ResolutionSpec) -> Option<DetailedTiming> {
         TimingKind::Pc => compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVTRB2),
     }?;
     dtd_fits(&t).then_some(t)
-}
-
-/// EDID DTD field limits (E-EDID 1.4 §3.10.2). A timing that exceeds any of
-/// them would be silently truncated by the low-level writer, so reject it.
-fn dtd_fits(t: &DetailedTiming) -> bool {
-    t.h_active <= 4095
-        && t.v_active <= 4095
-        && t.h_front + t.h_sync + t.h_back + 2 * t.h_border <= 4095 // HBlank: 12 bits
-        && t.v_front + t.v_sync + t.v_back + 2 * t.v_border <= 4095 // VBlank: 12 bits
-        && t.h_front <= 1023
-        && t.h_sync <= 1023
-        && t.v_front <= 63
-        && t.v_sync <= 63
-        && t.h_border <= 255
-        && t.v_border <= 255
-        && t.pixel_clock_khz <= 655_350 // 655.35 MHz: 16 bits of 10 kHz
 }
 
 #[cfg(test)]
