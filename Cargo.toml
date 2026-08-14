@@ -3,6 +3,10 @@ name = "edid-seria"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "EDID parsing and serialization for CRU: detailed timings, CVT, EDID block I/O"
+description = "EDID parsing and serialization: detailed timings, CVT/CVT-RB/CVT-RB2 computation, EDID block I/O"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kouhe3/edid-seria"
+keywords = ["edid", "display", "monitor", "resolution", "cvt"]
+categories = ["hardware-support", "multimedia::video"]
 
 [dependencies]
