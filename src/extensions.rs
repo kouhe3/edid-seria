@@ -142,7 +142,7 @@ impl CtaDataBlock {
     pub fn view(&self) -> Result<CtaDataBlockView, ExtensionError> {
         match self.tag {
             1 => {
-                if !self.payload.len().is_multiple_of(3) {
+                if self.payload.is_empty() || !self.payload.len().is_multiple_of(3) {
                     return Err(ExtensionError::InvalidAudioDataBlockLength {
                         length: self.payload.len(),
                     });
@@ -162,6 +162,9 @@ impl CtaDataBlock {
                 Ok(CtaDataBlockView::Audio { descriptors })
             }
             2 => {
+                if self.payload.is_empty() {
+                    return Err(ExtensionError::InvalidVideoDataBlockLength { length: 0 });
+                }
                 let mut modes = Vec::with_capacity(self.payload.len());
                 for (index, &code) in self.payload.iter().enumerate() {
                     let vic = code & 0x7F;
@@ -248,6 +251,11 @@ pub enum ExtensionError {
         /// Actual payload length.
         length: usize,
     },
+    /// CTA video data block has no SVD entries.
+    InvalidVideoDataBlockLength {
+        /// Actual payload length.
+        length: usize,
+    },
     /// CTA video data block contains a zero VIC.
     InvalidVideoCode {
         /// Zero-based payload index.
@@ -279,6 +287,12 @@ impl std::fmt::Display for ExtensionError {
                 write!(
                     f,
                     "CTA audio data block has invalid payload length {length}"
+                )
+            }
+            Self::InvalidVideoDataBlockLength { length } => {
+                write!(
+                    f,
+                    "CTA video data block has invalid payload length {length}"
                 )
             }
             Self::InvalidVideoCode { index } => {
@@ -506,6 +520,24 @@ mod tests {
                 length: 2,
                 minimum: 3,
             })
+        ));
+
+        let empty_audio = CtaDataBlock {
+            tag: 1,
+            payload: Vec::new(),
+        };
+        assert!(matches!(
+            empty_audio.view(),
+            Err(ExtensionError::InvalidAudioDataBlockLength { length: 0 })
+        ));
+
+        let empty_video = CtaDataBlock {
+            tag: 2,
+            payload: Vec::new(),
+        };
+        assert!(matches!(
+            empty_video.view(),
+            Err(ExtensionError::InvalidVideoDataBlockLength { length: 0 })
         ));
     }
 
