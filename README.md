@@ -20,7 +20,8 @@ CRU-style display override tools.
   silently truncating them.
  - **Strict parsing** — validated complete EDID sequences with base-header,
    checksum, version, extension-count, and structured error reporting.
- - **Metadata and descriptors** — typed base-block identity fields and common
+ - **Metadata and descriptors** — typed base-block identity, chromaticity
+   fixed-point coordinates, Established Timings, Standard Timings, and common
    monitor descriptors, with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
@@ -91,7 +92,7 @@ The optional fuzz target is under `fuzz/` and can be run with
 |--------|----------------|
 | [`timing`](src/timing.rs) | `DetailedTiming` model, preset tables, CVT computation, DTD field-limit checks |
 | [`edid`](src/edid.rs) | DTD bit-packing, slot classification, validated EDID blocks, checksums, flagged DTD access |
-| [`metadata`](src/metadata.rs) | Base-block metadata and monitor descriptor decoding/encoding |
+| [`metadata`](src/metadata.rs) | Base-block metadata, chromaticity, established/standard timings, and monitor descriptor decoding/encoding |
 | [`extensions`](src/extensions.rs) | CTA-861 data-block views and extension-kind detection |
 | [`serialize`](src/serialize.rs) | Resolution/manual timing → EDID pipeline with strict and compatibility APIs |
 | [`error`](src/error.rs) | Structured parsing, DTD, metadata, descriptor, and serialization errors |
