@@ -26,9 +26,11 @@
 // serrate/sync-on-green and encode neither polarity. HBlank/VBlank include
 // 2× the border values (bytes 15/16).
 
+use crate::error::EdidError;
 use crate::timing::DetailedTiming;
 
 const EDID_DESCRIPTOR_LEN: usize = 18;
+const EDID_HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
 /// Size of one EDID block in bytes.
 pub const EDID_BLOCK_SIZE: usize = 128;
 const DETAILED_SLOTS: usize = 4;
@@ -46,10 +48,34 @@ enum SlotKind {
 }
 
 /// One raw EDID block (base block or extension block).
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EdidBlock {
     /// The raw 128 EDID bytes.
     pub raw: [u8; EDID_BLOCK_SIZE],
+}
+
+/// Raw flags from DTD byte 17.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DtdFlags {
+    /// Original EDID byte 17, including interlace, stereo and sync fields.
+    pub raw: u8,
+}
+
+impl DtdFlags {
+    /// Whether the timing is interlaced.
+    #[must_use]
+    pub const fn interlaced(self) -> bool {
+        self.raw & 0x80 != 0
+    }
+}
+
+/// A decoded DTD with its timing and raw flag semantics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedDtd {
+    /// Decoded timing fields.
+    pub timing: DetailedTiming,
+    /// Original DTD flags.
+    pub flags: DtdFlags,
 }
 
 impl EdidBlock {
@@ -58,7 +84,7 @@ impl EdidBlock {
     pub fn new_default() -> Self {
         let mut raw = [0u8; EDID_BLOCK_SIZE];
         // EDID header: 00 FF FF FF FF FF FF 00
-        raw[..8].copy_from_slice(&[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+        raw[..8].copy_from_slice(&EDID_HEADER);
         // Version 1.4
         raw[18] = 0x01;
         raw[19] = 0x04;
@@ -67,7 +93,9 @@ impl EdidBlock {
         raw[20] = 0x80;
         // Extension count = 0
         raw[126] = 0x00;
-        Self { raw }
+        let mut block = Self { raw };
+        block.update_checksum();
+        block
     }
 
     /// Parse EDID from bytes
@@ -80,37 +108,66 @@ impl EdidBlock {
         raw.copy_from_slice(&data[..EDID_BLOCK_SIZE]);
         Some(Self { raw })
     }
+    /// Parse and validate exactly one EDID block.
+    ///
+    /// Base blocks must contain the EDID header. Extension blocks are accepted
+    /// by their non-zero tag and are validated by checksum only.
+    pub fn from_bytes_checked(data: &[u8]) -> Result<Self, EdidError> {
+        if data.len() != EDID_BLOCK_SIZE {
+            return Err(EdidError::InvalidLength {
+                expected: EDID_BLOCK_SIZE,
+                actual: data.len(),
+            });
+        }
+        let mut raw = [0u8; EDID_BLOCK_SIZE];
+        raw.copy_from_slice(data);
+        let block = Self { raw };
+        block.validate()?;
+        Ok(block)
+    }
 
-    /// Read detailed timing from slot (0-3)
+    /// Validate this block's base header when present and its checksum.
+    pub fn validate(&self) -> Result<(), EdidError> {
+        if self.raw[0] == 0 && self.raw[..8] != EDID_HEADER {
+            return Err(EdidError::InvalidHeader);
+        }
+        let sum = self
+            .raw
+            .iter()
+            .fold(0u8, |acc, &byte| acc.wrapping_add(byte));
+        if sum != 0 {
+            return Err(EdidError::InvalidChecksum { sum });
+        }
+        Ok(())
+    }
+
+    /// Read a progressive detailed timing from slot (0-3).
+    ///
+    /// Interlaced DTDs are available through [`Self::read_detailed_with_flags`]
+    /// and are intentionally excluded from this legacy progressive-only view.
     #[must_use]
     pub fn read_detailed(&self, slot: usize) -> Option<DetailedTiming> {
+        self.read_detailed_with_flags(slot)
+            .and_then(|decoded| (!decoded.flags.interlaced()).then_some(decoded.timing))
+    }
+
+    /// Read a detailed timing together with its original DTD flags.
+    #[must_use]
+    pub fn read_detailed_with_flags(&self, slot: usize) -> Option<DecodedDtd> {
         if slot >= DETAILED_SLOTS {
             return None;
         }
         let off = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
         let d = &self.raw[off..off + EDID_DESCRIPTOR_LEN];
-
-        // All-0x01 is a known padding pattern for unused slots, not a timing.
-        if d.iter().all(|&b| b == 0x01) {
+        if d.iter().all(|&byte| byte == 0x01) {
             return None;
         }
-        // Check if this is a monitor descriptor (not a timing)
-        // Monitor descriptors have pixel clock == 0 for tag-based ones
         let pixel_clock = u16::from_le_bytes([d[0], d[1]]);
-        if pixel_clock == 0 {
-            return None; // monitor descriptor, not a timing
-        }
-        // Clocks below 10 MHz are invalid data, not timings (same heuristic
-        // as edid-decode: padding/junk descriptors often carry tiny clocks).
-        if pixel_clock < 1000 {
+        if pixel_clock == 0 || pixel_clock < 1000 {
             return None;
-        }
-        if (d[17] & 0x80) != 0 {
-            return None; // interlaced timings not supported
         }
         let h_border = d[15] as u16;
         let v_border = d[16] as u16;
-
         let h_active = d[2] as u16 | ((d[4] as u16 & 0xF0) << 4);
         let h_blank = (d[3] as u16 | ((d[4] as u16 & 0x0F) << 8)).saturating_sub(h_border * 2);
         let v_active = d[5] as u16 | ((d[7] as u16 & 0xF0) << 4);
@@ -119,64 +176,99 @@ impl EdidBlock {
         let h_sync = d[9] as u16 | ((d[11] as u16 & 0x30) << 4);
         let v_front = (d[10] as u16 >> 4) | ((d[11] as u16 & 0x0C) << 2);
         let v_sync = (d[10] as u16 & 0x0F) | ((d[11] as u16 & 0x03) << 4);
-
         let h_back = h_blank.saturating_sub(h_front + h_sync);
         let v_back = v_blank.saturating_sub(v_front + v_sync);
 
-        // Byte 17 polarity bits mean different things per sync type
-        // (E-EDID 1.4 §3.10.2). Only digital separate sync encodes H/V
-        // polarity in bits 1/2; digital composite encodes H polarity only
-        // (V is always negative); analog composite/bipolar use those bits
-        // for serrate/sync-on-green and encode neither polarity.
         let sync_type = (d[17] >> 3) & 0x03;
-        let h_pol = sync_type >= 0x02 && (d[17] & 0x02) != 0;
-        let v_pol = sync_type == 0x03 && (d[17] & 0x04) != 0;
-
+        let h_pol = sync_type >= 0x02 && d[17] & 0x02 != 0;
+        let v_pol = sync_type == 0x03 && d[17] & 0x04 != 0;
         let h_total = h_active + h_blank;
         let v_total = v_active + v_blank;
         let v_rate = (pixel_clock as f64 * 10_000.0) / (h_total as f64 * v_total as f64);
 
-        Some(DetailedTiming {
-            h_active: h_active as u32,
-            v_active: v_active as u32,
-            h_front: h_front as u32,
-            h_sync: h_sync as u32,
-            h_back: h_back as u32,
-            v_front: v_front as u32,
-            v_sync: v_sync as u32,
-            v_back: v_back as u32,
-            h_border: h_border as u32,
-            v_border: v_border as u32,
-            pixel_clock_khz: pixel_clock as u32 * 10,
-            h_pol,
-            v_pol,
-            v_rate,
+        Some(DecodedDtd {
+            timing: DetailedTiming {
+                h_active: h_active as u32,
+                v_active: v_active as u32,
+                h_front: h_front as u32,
+                h_sync: h_sync as u32,
+                h_back: h_back as u32,
+                v_front: v_front as u32,
+                v_sync: v_sync as u32,
+                v_back: v_back as u32,
+                h_border: h_border as u32,
+                v_border: v_border as u32,
+                pixel_clock_khz: pixel_clock as u32 * 10,
+                h_pol,
+                v_pol,
+                v_rate,
+            },
+            flags: DtdFlags { raw: d[17] },
         })
     }
-
-    /// Write detailed timing to slot
-    ///
-    /// The timing must fit the DTD field limits of E-EDID 1.4 §3.10.2
-    /// (see [`crate::timing::dtd_fits`]); debug builds panic otherwise,
-    /// release builds truncate silently. The serialization pipeline
-    /// pre-validates via [`crate::serialize::serialize_resolutions`].
-    pub fn write_detailed(&mut self, slot: usize, t: &DetailedTiming) {
-        debug_assert!(
-            crate::timing::dtd_fits(t),
-            "timing exceeds DTD field limits: {t:?}"
-        );
-        if slot >= DETAILED_SLOTS {
-            return;
+    /// Validate fields specific to an EDID base block.
+    pub(crate) fn validate_base(&self) -> Result<(), EdidError> {
+        self.validate()?;
+        if self.raw[..8] != EDID_HEADER {
+            return Err(EdidError::InvalidHeader);
         }
+        let major = self.raw[18];
+        let minor = self.raw[19];
+        if major != 1 || minor > 4 {
+            return Err(EdidError::UnsupportedVersion { major, minor });
+        }
+        Ok(())
+    }
+
+    /// Write a detailed timing after validating every DTD field.
+    pub fn write_detailed_checked(
+        &mut self,
+        slot: usize,
+        t: &DetailedTiming,
+    ) -> Result<(), crate::error::DtdError> {
+        use crate::error::DtdError;
+
+        if slot >= DETAILED_SLOTS {
+            return Err(DtdError::SlotOutOfRange {
+                slot,
+                slots: DETAILED_SLOTS,
+            });
+        }
+        crate::timing::validate_dtd(t)?;
+
+        let pixel_clock = t
+            .pixel_clock_khz
+            .checked_add(5)
+            .ok_or(DtdError::ArithmeticOverflow)?
+            / 10;
+        let h_blank = t
+            .h_front
+            .checked_add(t.h_sync)
+            .and_then(|value| value.checked_add(t.h_back))
+            .and_then(|value| {
+                t.h_border
+                    .checked_mul(2)
+                    .and_then(|border| value.checked_add(border))
+            })
+            .ok_or(DtdError::ArithmeticOverflow)?;
+        let v_blank = t
+            .v_front
+            .checked_add(t.v_sync)
+            .and_then(|value| value.checked_add(t.v_back))
+            .and_then(|value| {
+                t.v_border
+                    .checked_mul(2)
+                    .and_then(|border| value.checked_add(border))
+            })
+            .ok_or(DtdError::ArithmeticOverflow)?;
+
         let off = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
         let d = &mut self.raw[off..off + EDID_DESCRIPTOR_LEN];
-
-        // DTD stores 10 kHz units; round to nearest instead of truncating.
-        let pixel_clock = ((t.pixel_clock_khz + 5) / 10) as u16;
+        let pixel_clock = pixel_clock as u16;
         let h_active = t.h_active as u16;
         let v_active = t.v_active as u16;
-        let h_blank = (t.h_front + t.h_sync + t.h_back + 2 * t.h_border) as u16;
-        let v_blank = (t.v_front + t.v_sync + t.v_back + 2 * t.v_border) as u16;
+        let h_blank = h_blank as u16;
+        let v_blank = v_blank as u16;
 
         d[0] = pixel_clock as u8;
         d[1] = (pixel_clock >> 8) as u8;
@@ -189,21 +281,20 @@ impl EdidBlock {
         d[8] = t.h_front as u8;
         d[9] = t.h_sync as u8;
         d[10] = ((t.v_front as u8 & 0x0F) << 4) | (t.v_sync as u8 & 0x0F);
-        d[11] = ((t.h_front as u16 >> 8) as u8 & 0x03) << 6
-            | ((t.h_sync as u16 >> 8) as u8 & 0x03) << 4
-            | ((t.v_front as u16 >> 4) as u8 & 0x03) << 2
-            | ((t.v_sync as u16 >> 4) as u8 & 0x03);
+        d[11] = (((t.h_front as u16 >> 8) & 0x03) as u8) << 6
+            | (((t.h_sync as u16 >> 8) & 0x03) as u8) << 4
+            | (((t.v_front as u16 >> 4) & 0x03) as u8) << 2
+            | ((t.v_sync as u16 >> 4) & 0x03) as u8;
 
-        // HSize / VSize (display physical size in mm, set to HActive/4 for 4px/mm)
         let hsize = h_active / 4;
         let vsize = v_active / 4;
         d[12] = hsize as u8;
         d[13] = vsize as u8;
-        d[14] = (((hsize >> 8) & 0x0F) as u8) << 4 | (((vsize >> 8) & 0x0F) as u8);
+        d[14] = (((hsize >> 8) & 0x0F) as u8) << 4 | ((vsize >> 8) & 0x0F) as u8;
         d[15] = t.h_border as u8;
         d[16] = t.v_border as u8;
 
-        let mut flags = 0x18u8; // digital separate sync
+        let mut flags = 0x18u8;
         if t.h_pol {
             flags |= 0x02;
         }
@@ -211,6 +302,27 @@ impl EdidBlock {
             flags |= 0x04;
         }
         d[17] = flags;
+        Ok(())
+    }
+
+    /// Write a detailed timing, retaining the legacy infallible signature.
+    ///
+    /// Invalid timings are rejected without modifying the block. Use
+    /// [`Self::write_detailed_checked`] when the failure reason is needed.
+    pub fn write_detailed(&mut self, slot: usize, t: &DetailedTiming) {
+        let _ = self.write_detailed_checked(slot, t);
+    }
+    /// Write a timing while preserving explicit DTD flag semantics.
+    pub fn write_detailed_with_flags_checked(
+        &mut self,
+        slot: usize,
+        timing: &DetailedTiming,
+        flags: DtdFlags,
+    ) -> Result<(), crate::error::DtdError> {
+        self.write_detailed_checked(slot, timing)?;
+        let offset = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
+        self.raw[offset + 17] = flags.raw;
+        Ok(())
     }
 
     /// Clear a detailed timing slot to CRU's dummy descriptor convention:
@@ -248,33 +360,94 @@ impl EdidBlock {
         }
     }
 
-    /// Replace the timings in the base block, preserving monitor descriptors.
+    /// Replace timings after validating all DTD fields.
     ///
-    /// Timings are written into existing timing slots first (so replacements
-    /// keep their positions), then into free (dummy/empty) slots. Monitor
-    /// descriptors (name, range limits, ...) are left untouched, and timing
-    /// slots left over after the write are cleared to dummy descriptors.
-    /// Returns the number of timings written.
-    pub fn write_resolutions(&mut self, timings: &[DetailedTiming]) -> usize {
+    /// Existing timing slots are reused before free slots. Monitor
+    /// descriptors are never modified. If a timing is invalid, the block is
+    /// left unchanged.
+    pub fn write_resolutions_checked(
+        &mut self,
+        timings: &[DetailedTiming],
+    ) -> Result<usize, crate::error::DtdError> {
+        for timing in timings {
+            crate::timing::validate_dtd(timing)?;
+        }
+
         let kinds: Vec<SlotKind> = (0..DETAILED_SLOTS).map(|s| self.slot_kind(s)).collect();
         let mut slots: Vec<usize> = kinds
             .iter()
             .enumerate()
-            .filter(|&(_, k)| *k != SlotKind::Descriptor)
-            .map(|(i, _)| i)
+            .filter(|&(_, kind)| *kind != SlotKind::Descriptor)
+            .map(|(index, _)| index)
             .collect();
-        slots.sort_by_key(|&s| if kinds[s] == SlotKind::Timing { 0 } else { 1 });
+        slots.sort_by_key(|&slot| {
+            if kinds[slot] == SlotKind::Timing {
+                0
+            } else {
+                1
+            }
+        });
+
+        if timings.len() > slots.len() {
+            return Err(crate::error::DtdError::NoAvailableSlot {
+                requested: timings.len(),
+                available: slots.len(),
+            });
+        }
 
         let mut written = 0;
-        for (i, t) in timings.iter().enumerate() {
-            if let Some(&s) = slots.get(i) {
-                self.write_detailed(s, t);
+        for (index, timing) in timings.iter().enumerate() {
+            if let Some(&slot) = slots.get(index) {
+                self.write_detailed_checked(slot, timing)?;
                 written += 1;
             }
         }
-        for &s in &slots[written..] {
-            if kinds[s] == SlotKind::Timing {
-                self.clear_slot(s);
+        for &slot in &slots[written..] {
+            if kinds[slot] == SlotKind::Timing {
+                self.clear_slot(slot);
+            }
+        }
+        Ok(written)
+    }
+
+    /// Replace timings while retaining the legacy infallible signature.
+    ///
+    /// Invalid timings are rejected without modifying the block. Use
+    /// [`Self::write_resolutions_checked`] when the failure reason is needed.
+    pub fn write_resolutions(&mut self, timings: &[DetailedTiming]) -> usize {
+        if timings
+            .iter()
+            .any(|timing| crate::timing::validate_dtd(timing).is_err())
+        {
+            return 0;
+        }
+        let kinds: Vec<SlotKind> = (0..DETAILED_SLOTS)
+            .map(|slot| self.slot_kind(slot))
+            .collect();
+        let mut slots: Vec<usize> = kinds
+            .iter()
+            .enumerate()
+            .filter(|&(_, kind)| *kind != SlotKind::Descriptor)
+            .map(|(index, _)| index)
+            .collect();
+        slots.sort_by_key(|&slot| {
+            if kinds[slot] == SlotKind::Timing {
+                0
+            } else {
+                1
+            }
+        });
+
+        let mut written = 0;
+        for (index, timing) in timings.iter().enumerate() {
+            if let Some(&slot) = slots.get(index) {
+                self.write_detailed(slot, timing);
+                written += 1;
+            }
+        }
+        for &slot in &slots[written..] {
+            if kinds[slot] == SlotKind::Timing {
+                self.clear_slot(slot);
             }
         }
         written
@@ -301,10 +474,199 @@ impl EdidBlock {
     }
 }
 
+/// A complete EDID made of one validated base block and its extensions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edid {
+    /// Validated EDID base block.
+    pub base: EdidBlock,
+    /// Validated extension blocks in their original order.
+    pub extensions: Vec<EdidBlock>,
+}
+
+impl Edid {
+    /// Parse and validate a complete EDID byte sequence.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, EdidError> {
+        if data.len() < EDID_BLOCK_SIZE || !data.len().is_multiple_of(EDID_BLOCK_SIZE) {
+            return Err(EdidError::InvalidBlockSequenceLength { actual: data.len() });
+        }
+
+        let base = EdidBlock::from_bytes_checked(&data[..EDID_BLOCK_SIZE])?;
+        base.validate_base()?;
+
+        let actual = data.len() / EDID_BLOCK_SIZE - 1;
+        let declared = base.raw[126] as usize;
+        if declared != actual {
+            return Err(EdidError::ExtensionCountMismatch { declared, actual });
+        }
+
+        let mut extensions = Vec::with_capacity(actual);
+        let (extension_chunks, _) = data[EDID_BLOCK_SIZE..].as_chunks::<EDID_BLOCK_SIZE>();
+        for chunk in extension_chunks {
+            extensions.push(EdidBlock::from_bytes_checked(chunk)?);
+        }
+
+        Ok(Self { base, extensions })
+    }
+
+    /// Return the complete EDID as contiguous bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity((self.extensions.len() + 1) * EDID_BLOCK_SIZE);
+        bytes.extend_from_slice(self.base.as_bytes());
+        for extension in &self.extensions {
+            bytes.extend_from_slice(extension.as_bytes());
+        }
+        bytes
+    }
+
+    /// Validate the base block and every extension block.
+    pub fn validate(&self) -> Result<(), EdidError> {
+        self.base.validate_base()?;
+        let actual = self.extensions.len();
+        let declared = self.base.raw[126] as usize;
+        if declared != actual {
+            return Err(EdidError::ExtensionCountMismatch { declared, actual });
+        }
+        for extension in &self.extensions {
+            extension.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::EdidError;
     use crate::timing::DetailedTiming;
+
+    #[test]
+    fn default_block_has_valid_checksum() {
+        let block = EdidBlock::new_default();
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn interlaced_dtd_is_available_through_flagged_api() {
+        let mut block = EdidBlock::new_default();
+        block.write_detailed_checked(0, &make_timing()).unwrap();
+        let offset = DETAILED_START;
+        block.raw[offset + 17] |= 0x80;
+
+        assert!(block.read_detailed(0).is_none());
+        let decoded = block.read_detailed_with_flags(0).unwrap();
+        assert!(decoded.flags.interlaced());
+        assert_eq!(decoded.timing.h_active, 1920);
+
+        let mut roundtrip = EdidBlock::new_default();
+        roundtrip
+            .write_detailed_with_flags_checked(0, &decoded.timing, decoded.flags)
+            .unwrap();
+        assert_eq!(roundtrip.raw[offset + 17], block.raw[offset + 17]);
+    }
+
+    #[test]
+    fn strict_parse_rejects_invalid_length_and_checksum() {
+        let block = EdidBlock::new_default();
+        assert!(matches!(
+            EdidBlock::from_bytes_checked(&block.as_bytes()[..127]),
+            Err(EdidError::InvalidLength {
+                expected: EDID_BLOCK_SIZE,
+                actual: 127
+            })
+        ));
+
+        let mut corrupted = block.raw;
+        corrupted[10] ^= 0x01;
+        assert!(matches!(
+            EdidBlock::from_bytes_checked(&corrupted),
+            Err(EdidError::InvalidChecksum { .. })
+        ));
+    }
+
+    #[test]
+    fn strict_parse_rejects_invalid_base_header() {
+        let mut block = EdidBlock::new_default();
+        block.raw[1] = 0x00;
+        block.update_checksum();
+        assert!(matches!(
+            EdidBlock::from_bytes_checked(block.as_bytes()),
+            Err(EdidError::InvalidHeader)
+        ));
+    }
+
+    #[test]
+    fn strict_parse_accepts_valid_extension_block() {
+        let mut block = EdidBlock::new_default();
+        block.raw[0] = 0x02;
+        block.update_checksum();
+        assert!(EdidBlock::from_bytes_checked(block.as_bytes()).is_ok());
+    }
+    #[test]
+    fn checked_dtd_write_rejects_invalid_timing_without_mutation() {
+        let mut block = EdidBlock::new_default();
+        let before = block.raw;
+        let mut timing = make_timing();
+        timing.h_front = 1024;
+        assert!(matches!(
+            block.write_detailed_checked(0, &timing),
+            Err(crate::error::DtdError::FieldOutOfRange { .. })
+        ));
+        assert_eq!(block.raw, before);
+        assert!(matches!(
+            block.write_detailed_checked(4, &make_timing()),
+            Err(crate::error::DtdError::SlotOutOfRange { slot: 4, slots: 4 })
+        ));
+    }
+
+    #[test]
+    fn aggregate_parser_preserves_valid_extensions() {
+        let mut base = EdidBlock::new_default();
+        let mut extension = EdidBlock::new_default();
+        extension.raw[0] = 0x02;
+        extension.raw[1] = 0x03;
+        extension.update_checksum();
+        base.raw[126] = 1;
+        base.update_checksum();
+
+        let mut bytes = base.as_bytes().to_vec();
+        bytes.extend_from_slice(extension.as_bytes());
+        let edid = Edid::from_bytes(&bytes).unwrap();
+
+        assert_eq!(edid.extensions.len(), 1);
+        assert_eq!(edid.extensions[0].raw[0], 0x02);
+        assert_eq!(edid.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn aggregate_parser_rejects_partial_and_count_mismatch() {
+        assert!(matches!(
+            Edid::from_bytes(&[0u8; 127]),
+            Err(EdidError::InvalidBlockSequenceLength { actual: 127 })
+        ));
+
+        let base = EdidBlock::new_default();
+        let mut bytes = base.as_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; EDID_BLOCK_SIZE]);
+        assert!(matches!(
+            Edid::from_bytes(&bytes),
+            Err(EdidError::ExtensionCountMismatch {
+                declared: 0,
+                actual: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn aggregate_parser_rejects_unsupported_base_version() {
+        let mut base = EdidBlock::new_default();
+        base.raw[18] = 2;
+        base.update_checksum();
+        assert!(matches!(
+            Edid::from_bytes(base.as_bytes()),
+            Err(EdidError::UnsupportedVersion { major: 2, minor: 4 })
+        ));
+    }
 
     fn make_timing() -> DetailedTiming {
         DetailedTiming {

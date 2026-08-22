@@ -7,6 +7,7 @@
 //! checksum of every block, and returns the complete EDID binary.
 
 use crate::edid::{EDID_BLOCK_SIZE, EdidBlock};
+use crate::error::SerializeError;
 use crate::timing::{DetailedTiming, TimingFormula, compute_cvt, dtd_fits};
 
 /// PC vs HDTV timing style. Mirrors the GUI's mode selector.
@@ -86,6 +87,126 @@ pub fn serialize_resolutions(
         skipped,
     }
 }
+/// Strict counterpart to [`serialize_resolutions`].
+///
+/// Existing data must contain complete, checksum-valid EDID blocks. The base
+/// block header and extension count are validated, and every requested
+/// resolution must produce a DTD that fits an available slot.
+pub fn serialize_resolutions_checked(
+    existing: Option<&[u8]>,
+    resolutions: &[ResolutionSpec],
+) -> Result<SerializedEdid, SerializeError> {
+    let blocks = parse_existing_blocks(existing)?;
+    let timings: Vec<DetailedTiming> = resolutions
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| timing_for_checked(index, spec))
+        .collect::<Result<_, _>>()?;
+    serialize_timing_blocks(blocks, &timings)
+}
+
+/// Serialize caller-provided detailed timings into an EDID override.
+///
+/// This is the strict manual-timing entry point. Existing blocks are validated
+/// and every timing must fit the EDID DTD representation.
+pub fn serialize_timings(
+    existing: Option<&[u8]>,
+    timings: &[DetailedTiming],
+) -> Result<SerializedEdid, SerializeError> {
+    let blocks = parse_existing_blocks(existing)?;
+    serialize_timing_blocks(blocks, timings)
+}
+
+fn parse_existing_blocks(existing: Option<&[u8]>) -> Result<Vec<EdidBlock>, SerializeError> {
+    let Some(data) = existing else {
+        return Ok(vec![EdidBlock::new_default()]);
+    };
+    if data.len() < EDID_BLOCK_SIZE || !data.len().is_multiple_of(EDID_BLOCK_SIZE) {
+        return Err(SerializeError::InvalidExistingLength { actual: data.len() });
+    }
+
+    let mut blocks = Vec::with_capacity(data.len() / EDID_BLOCK_SIZE);
+    for (index, chunk) in data.chunks(EDID_BLOCK_SIZE).enumerate() {
+        let block = EdidBlock::from_bytes_checked(chunk)
+            .map_err(|source| SerializeError::InvalidExistingBlock { index, source })?;
+        if index == 0 {
+            block
+                .validate_base()
+                .map_err(|source| SerializeError::InvalidExistingBlock { index, source })?;
+        }
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
+fn validate_block_sequence(blocks: &[EdidBlock]) -> Result<(), SerializeError> {
+    let extension_count = blocks.len() - 1;
+    if extension_count > u8::MAX as usize {
+        return Err(SerializeError::TooManyExtensions {
+            count: extension_count,
+        });
+    }
+    let declared = blocks[0].raw[126] as usize;
+    if declared != extension_count {
+        return Err(SerializeError::ExtensionCountMismatch {
+            declared,
+            actual: extension_count,
+        });
+    }
+    Ok(())
+}
+
+fn serialize_timing_blocks(
+    mut blocks: Vec<EdidBlock>,
+    timings: &[DetailedTiming],
+) -> Result<SerializedEdid, SerializeError> {
+    validate_block_sequence(&blocks)?;
+    for (index, timing) in timings.iter().enumerate() {
+        crate::timing::validate_dtd(timing)
+            .map_err(|source| SerializeError::InvalidTiming { index, source })?;
+    }
+
+    let written = blocks[0]
+        .write_resolutions_checked(timings)
+        .map_err(|source| match source {
+            crate::error::DtdError::NoAvailableSlot { .. } => SerializeError::NoDtdSlot {
+                index: timings.len().saturating_sub(1),
+            },
+            source => SerializeError::InvalidTiming { index: 0, source },
+        })?;
+    if written != timings.len() {
+        return Err(SerializeError::NoDtdSlot { index: written });
+    }
+
+    for block in &mut blocks {
+        block.update_checksum();
+    }
+
+    Ok(SerializedEdid {
+        bytes: blocks.into_iter().flat_map(|block| block.raw).collect(),
+        written,
+        skipped: 0,
+    })
+}
+
+fn timing_for_checked(
+    index: usize,
+    spec: &ResolutionSpec,
+) -> Result<DetailedTiming, SerializeError> {
+    if !spec.refresh.is_finite() {
+        return Err(SerializeError::TimingUnavailable { index });
+    }
+    let timing = match spec.kind {
+        TimingKind::Hdtv => DetailedTiming::compute_blanking(spec.width, spec.height, spec.refresh)
+            .or_else(|| compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVT)),
+        TimingKind::Pc => compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVTRB2),
+    }
+    .ok_or(SerializeError::TimingUnavailable { index })?;
+    if !dtd_fits(&timing) {
+        return Err(SerializeError::TimingDoesNotFit { index });
+    }
+    Ok(timing)
+}
 
 /// Compute the DTD for a resolution spec; `None` when the timing cannot be
 /// computed or does not fit in an EDID DTD.
@@ -102,6 +223,7 @@ fn timing_for(spec: &ResolutionSpec) -> Option<DetailedTiming> {
 mod tests {
     use super::*;
     use crate::edid::{DETAILED_START, EdidBlock};
+    use crate::error::{EdidError, SerializeError};
     use crate::timing::all_presets;
 
     const DESCRIPTOR_LEN: usize = 18;
@@ -256,5 +378,74 @@ mod tests {
         assert_eq!(out.written, 1);
         assert_eq!(out.bytes.len(), EDID_BLOCK_SIZE);
         checksum_ok(&out.bytes);
+    }
+
+    #[test]
+    fn strict_serializer_rejects_invalid_existing_length() {
+        assert!(matches!(
+            serialize_resolutions_checked(Some(&[0u8; 127]), &[]),
+            Err(SerializeError::InvalidExistingLength { actual: 127 })
+        ));
+    }
+
+    #[test]
+    fn strict_serializer_reports_existing_block_errors() {
+        let mut block = EdidBlock::new_default();
+        block.raw[10] ^= 0x01;
+        assert!(matches!(
+            serialize_resolutions_checked(Some(block.as_bytes()), &[]),
+            Err(SerializeError::InvalidExistingBlock {
+                index: 0,
+                source: EdidError::InvalidChecksum { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn strict_serializer_reports_timing_and_slot_errors() {
+        assert!(matches!(
+            serialize_resolutions_checked(
+                Some(EdidBlock::new_default().as_bytes()),
+                &[spec(0, 1080, 60.0, TimingKind::Pc)]
+            ),
+            Err(SerializeError::TimingUnavailable { index: 0 })
+        ));
+
+        let resolutions = [spec(1920, 1080, 60.0, TimingKind::Pc); 5];
+        assert!(matches!(
+            serialize_resolutions_checked(None, &resolutions),
+            Err(SerializeError::NoDtdSlot { index: 4 })
+        ));
+    }
+
+    #[test]
+    fn strict_serializer_writes_valid_output() {
+        let out =
+            serialize_resolutions_checked(None, &[spec(1920, 1080, 60.0, TimingKind::Pc)]).unwrap();
+        assert_eq!(out.skipped, 0);
+        checksum_ok(&out.bytes);
+    }
+    #[test]
+    fn manual_timing_serializer_writes_detailed_timing() {
+        let timing = all_presets()[0].clone();
+        let out = serialize_timings(None, std::slice::from_ref(&timing)).unwrap();
+        let read = EdidBlock::from_bytes(&out.bytes)
+            .unwrap()
+            .read_detailed(0)
+            .unwrap();
+        assert_eq!(read.h_active, timing.h_active);
+        assert_eq!(read.v_active, timing.v_active);
+        assert_eq!(out.written, 1);
+        checksum_ok(&out.bytes);
+    }
+
+    #[test]
+    fn manual_timing_serializer_reports_invalid_timing_index() {
+        let mut timing = all_presets()[0].clone();
+        timing.h_front = 1024;
+        assert!(matches!(
+            serialize_timings(None, &[all_presets()[0].clone(), timing]),
+            Err(SerializeError::InvalidTiming { index: 1, .. })
+        ));
     }
 }

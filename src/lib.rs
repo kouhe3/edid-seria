@@ -10,9 +10,17 @@
 //! No OS dependencies; the registry and elevation glue lives in `cru-rs`.
 
 pub mod edid;
+pub mod error;
+pub mod extensions;
+pub mod metadata;
 pub mod serialize;
 pub mod timing;
-
-pub use edid::{EDID_BLOCK_SIZE, EdidBlock};
-pub use serialize::{ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions};
-pub use timing::{DetailedTiming, TimingFormula, all_presets, compute_cvt, dtd_fits};
+pub use edid::{DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock};
+pub use error::{DescriptorError, DtdError, DtdField, EdidError, MetadataError, SerializeError};
+pub use extensions::{CtaDataBlock, ExtensionError, ExtensionKind};
+pub use metadata::{BaseMetadata, MonitorDescriptor};
+pub use serialize::{
+    ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions,
+    serialize_resolutions_checked, serialize_timings,
+};
+pub use timing::{DetailedTiming, TimingFormula, all_presets, compute_cvt, dtd_fits, validate_dtd};
