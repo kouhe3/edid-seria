@@ -22,6 +22,35 @@ pub enum ExtensionKind {
     },
 }
 
+impl ExtensionKind {
+    /// Return the CTA-861 revision when this is a CTA extension.
+    #[must_use]
+    pub const fn cta_revision(self) -> Option<u8> {
+        match self {
+            Self::Cta861 { revision } => Some(revision),
+            _ => None,
+        }
+    }
+
+    /// Return the DisplayID version when this is a DisplayID extension.
+    #[must_use]
+    pub const fn display_id_version(self) -> Option<u8> {
+        match self {
+            Self::DisplayId { version } => Some(version),
+            _ => None,
+        }
+    }
+
+    /// Return the raw extension tag when this is an unknown extension.
+    #[must_use]
+    pub const fn unknown_tag(self) -> Option<u8> {
+        match self {
+            Self::Unknown { tag } => Some(tag),
+            _ => None,
+        }
+    }
+}
+
 /// A CTA data block with its three-bit tag and raw payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CtaDataBlock {
