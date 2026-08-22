@@ -80,7 +80,8 @@ impl DetailedTiming {
 /// EDID DTD field limits (E-EDID 1.4 §3.10.2).
 ///
 /// Unlike [`dtd_fits`], this function reports the first invalid field and uses
-/// checked arithmetic for blanking totals.
+/// checked arithmetic for blanking totals. Pixel clocks below 10 MHz are
+/// rejected because the EDID reader treats them as invalid timing data.
 pub fn validate_dtd(t: &DetailedTiming) -> Result<(), crate::error::DtdError> {
     use crate::error::{DtdError, DtdField};
 
@@ -108,7 +109,13 @@ pub fn validate_dtd(t: &DetailedTiming) -> Result<(), crate::error::DtdError> {
     limit(DtdField::VerticalSync, t.v_sync, 63)?;
     limit(DtdField::HorizontalBorder, t.h_border, 255)?;
     limit(DtdField::VerticalBorder, t.v_border, 255)?;
-    positive(DtdField::PixelClockKHz, t.pixel_clock_khz, 655_350)?;
+    if t.pixel_clock_khz < 10_000 {
+        return Err(DtdError::InvalidField {
+            field: DtdField::PixelClockKHz,
+            value: t.pixel_clock_khz,
+        });
+    }
+    limit(DtdField::PixelClockKHz, t.pixel_clock_khz, 655_350)?;
 
     let h_blank = t
         .h_front
@@ -1213,6 +1220,7 @@ mod tests {
                 ..
             })
         ));
+        timing.pixel_clock_khz = 10_000;
 
         timing.h_front = 1023;
         timing.h_sync = 1023;
@@ -1280,6 +1288,32 @@ mod tests {
             Err(crate::error::DtdError::InvalidField {
                 field: crate::error::DtdField::PixelClockKHz,
                 value: 0
+            })
+        ));
+    }
+    #[test]
+    fn dtd_validation_rejects_unreadable_low_pixel_clock() {
+        let timing = DetailedTiming {
+            h_active: 1920,
+            v_active: 1080,
+            h_front: 88,
+            h_sync: 44,
+            h_back: 148,
+            v_front: 4,
+            v_sync: 5,
+            v_back: 36,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 9,
+            h_pol: true,
+            v_pol: true,
+            v_rate: 60.0,
+        };
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::InvalidField {
+                field: crate::error::DtdField::PixelClockKHz,
+                value: 9
             })
         ));
     }

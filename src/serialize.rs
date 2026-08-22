@@ -462,4 +462,13 @@ mod tests {
             .unwrap();
         assert_ne!(timing.h_sync, 32);
     }
+    #[test]
+    fn manual_timing_serializer_rejects_low_pixel_clock() {
+        let mut timing = all_presets()[0].clone();
+        timing.pixel_clock_khz = 9;
+        assert!(matches!(
+            serialize_timings(None, std::slice::from_ref(&timing)),
+            Err(SerializeError::InvalidTiming { index: 0, .. })
+        ));
+    }
 }
