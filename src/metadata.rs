@@ -164,6 +164,9 @@ impl EdidBlock {
 
     /// Encode base-block identity and capability fields.
     pub fn set_metadata(&mut self, metadata: &BaseMetadata) -> Result<(), MetadataError> {
+        if self.raw[..8] != EDID_HEADER {
+            return Err(MetadataError::NotBaseBlock);
+        }
         metadata.validate()?;
         let id = metadata.manufacturer_id.as_bytes();
         let encoded = ((id[0] - b'A' + 1) as u16) << 10
@@ -223,6 +226,9 @@ impl EdidBlock {
         slot: usize,
         descriptor: &MonitorDescriptor,
     ) -> Result<(), DescriptorError> {
+        if self.raw[..8] != EDID_HEADER {
+            return Err(DescriptorError::NotBaseBlock);
+        }
         let offset = descriptor_offset(slot)?;
         let (tag, payload) = descriptor.encode()?;
         let target = &mut self.raw[offset..offset + DESCRIPTOR_LEN];
@@ -280,6 +286,7 @@ fn decode_text(payload: &[u8; TEXT_PAYLOAD_LEN]) -> Result<String, DescriptorErr
 mod tests {
     use super::{BaseMetadata, MonitorDescriptor};
     use crate::edid::EdidBlock;
+    use crate::error::{DescriptorError, MetadataError};
 
     #[test]
     fn metadata_roundtrips_identity_fields() {
@@ -331,6 +338,34 @@ mod tests {
             &MonitorDescriptor::ProductName("0123456789ABC".to_owned()),
         );
         assert!(result.is_err());
+        assert_eq!(block.raw, before);
+    }
+    #[test]
+    fn metadata_setters_reject_extension_blocks_without_mutation() {
+        let metadata = BaseMetadata {
+            manufacturer_id: "ABC".to_owned(),
+            product_code: 1,
+            serial_number: 2,
+            manufacture_week: 1,
+            manufacture_year: 2024,
+            input: 0x80,
+            horizontal_size_cm: 1,
+            vertical_size_cm: 1,
+            gamma: None,
+            feature_flags: 0,
+        };
+        let mut block = EdidBlock::new_default();
+        block.raw[0] = 0x02;
+        block.update_checksum();
+        let before = block.raw;
+        assert_eq!(
+            block.set_metadata(&metadata),
+            Err(MetadataError::NotBaseBlock)
+        );
+        assert_eq!(
+            block.set_monitor_descriptor(0, &MonitorDescriptor::ProductName("X".to_owned())),
+            Err(DescriptorError::NotBaseBlock)
+        );
         assert_eq!(block.raw, before);
     }
 }

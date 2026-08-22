@@ -99,6 +99,8 @@ pub enum DescriptorError {
         /// Number of descriptor slots.
         slots: usize,
     },
+    /// The block does not contain the EDID base-block header.
+    NotBaseBlock,
     /// Text is longer than the 13-byte descriptor payload.
     TextTooLong {
         /// Maximum text length in bytes.
@@ -111,7 +113,6 @@ pub enum DescriptorError {
     /// A range-limit field is outside its one-byte EDID representation.
     RangeOutOfBounds,
 }
-
 impl fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -122,6 +123,7 @@ impl fmt::Display for DescriptorError {
                     slots
                 )
             }
+            Self::NotBaseBlock => f.write_str("block is not an EDID base block"),
             Self::TextTooLong { max, actual } => {
                 write!(f, "descriptor text is {actual} bytes, maximum is {max}")
             }
@@ -170,6 +172,13 @@ pub enum DtdError {
         /// Number of available DTD slots.
         slots: usize,
     },
+    /// A field has an invalid value even though it fits its bit width.
+    InvalidField {
+        /// Field with the invalid value.
+        field: DtdField,
+        /// Supplied field value.
+        value: u32,
+    },
     /// A field exceeds its EDID bit-field limit.
     FieldOutOfRange {
         /// Field that exceeded its limit.
@@ -194,6 +203,9 @@ impl fmt::Display for DtdError {
         match self {
             Self::SlotOutOfRange { slot, slots } => {
                 write!(f, "DTD slot {slot} is out of range ({} slots)", slots)
+            }
+            Self::InvalidField { field, value } => {
+                write!(f, "DTD field {field:?} has invalid value {value}")
             }
             Self::FieldOutOfRange { field, value, max } => {
                 write!(f, "DTD field {field:?} value {value} exceeds {max}")

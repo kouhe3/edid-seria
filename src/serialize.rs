@@ -197,8 +197,10 @@ fn timing_for_checked(
         return Err(SerializeError::TimingUnavailable { index });
     }
     let timing = match spec.kind {
-        TimingKind::Hdtv => DetailedTiming::compute_blanking(spec.width, spec.height, spec.refresh)
-            .or_else(|| compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVT)),
+        TimingKind::Hdtv => {
+            DetailedTiming::compute_hdtv_blanking(spec.width, spec.height, spec.refresh)
+                .or_else(|| compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVT))
+        }
         TimingKind::Pc => compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVTRB2),
     }
     .ok_or(SerializeError::TimingUnavailable { index })?;
@@ -211,12 +213,14 @@ fn timing_for_checked(
 /// Compute the DTD for a resolution spec; `None` when the timing cannot be
 /// computed or does not fit in an EDID DTD.
 fn timing_for(spec: &ResolutionSpec) -> Option<DetailedTiming> {
-    let t = match spec.kind {
-        TimingKind::Hdtv => DetailedTiming::compute_blanking(spec.width, spec.height, spec.refresh)
-            .or_else(|| compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVT)),
+    let timing = match spec.kind {
+        TimingKind::Hdtv => {
+            DetailedTiming::compute_hdtv_blanking(spec.width, spec.height, spec.refresh)
+                .or_else(|| compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVT))
+        }
         TimingKind::Pc => compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVTRB2),
     }?;
-    dtd_fits(&t).then_some(t)
+    dtd_fits(&timing).then_some(timing)
 }
 
 #[cfg(test)]
@@ -447,5 +451,15 @@ mod tests {
             serialize_timings(None, &[all_presets()[0].clone(), timing]),
             Err(SerializeError::InvalidTiming { index: 1, .. })
         ));
+    }
+    #[test]
+    fn hdtv_serializer_does_not_use_pc_wide_preset() {
+        let out = serialize_resolutions_checked(None, &[spec(1280, 800, 60.0, TimingKind::Hdtv)])
+            .unwrap();
+        let timing = EdidBlock::from_bytes(&out.bytes)
+            .unwrap()
+            .read_detailed(0)
+            .unwrap();
+        assert_ne!(timing.h_sync, 32);
     }
 }

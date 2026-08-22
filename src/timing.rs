@@ -65,6 +65,16 @@ impl DetailedTiming {
             })
             .cloned()
     }
+
+    /// Look up a standard HDTV/CEA timing without considering PC presets.
+    #[must_use]
+    pub fn compute_hdtv_blanking(width: u32, height: u32, refresh: f64) -> Option<DetailedTiming> {
+        hdtv_presets().into_iter().find(|preset| {
+            preset.h_active == width
+                && preset.v_active == height
+                && (preset.v_rate - refresh).abs() < 0.5
+        })
+    }
 }
 
 /// EDID DTD field limits (E-EDID 1.4 §3.10.2).
@@ -82,15 +92,23 @@ pub fn validate_dtd(t: &DetailedTiming) -> Result<(), crate::error::DtdError> {
         }
     }
 
-    limit(DtdField::HorizontalActive, t.h_active, 4095)?;
-    limit(DtdField::VerticalActive, t.v_active, 4095)?;
+    fn positive(field: DtdField, value: u32, max: u32) -> Result<(), DtdError> {
+        if value == 0 {
+            Err(DtdError::InvalidField { field, value })
+        } else {
+            limit(field, value, max)
+        }
+    }
+
+    positive(DtdField::HorizontalActive, t.h_active, 4095)?;
+    positive(DtdField::VerticalActive, t.v_active, 4095)?;
     limit(DtdField::HorizontalFrontPorch, t.h_front, 1023)?;
     limit(DtdField::HorizontalSync, t.h_sync, 1023)?;
     limit(DtdField::VerticalFrontPorch, t.v_front, 63)?;
     limit(DtdField::VerticalSync, t.v_sync, 63)?;
     limit(DtdField::HorizontalBorder, t.h_border, 255)?;
     limit(DtdField::VerticalBorder, t.v_border, 255)?;
-    limit(DtdField::PixelClockKHz, t.pixel_clock_khz, 655_350)?;
+    positive(DtdField::PixelClockKHz, t.pixel_clock_khz, 655_350)?;
 
     let h_blank = t
         .h_front
@@ -1227,5 +1245,42 @@ mod tests {
             v_rate: 60.0,
         };
         assert_eq!(validate_dtd(&timing), Ok(()));
+    }
+    #[test]
+    fn dtd_validation_rejects_zero_active_or_clock() {
+        let mut timing = DetailedTiming {
+            h_active: 1920,
+            v_active: 1080,
+            h_front: 88,
+            h_sync: 44,
+            h_back: 148,
+            v_front: 4,
+            v_sync: 5,
+            v_back: 36,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 148500,
+            h_pol: true,
+            v_pol: true,
+            v_rate: 60.0,
+        };
+        timing.h_active = 0;
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::InvalidField {
+                field: crate::error::DtdField::HorizontalActive,
+                value: 0
+            })
+        ));
+
+        timing.h_active = 1920;
+        timing.pixel_clock_khz = 0;
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::InvalidField {
+                field: crate::error::DtdField::PixelClockKHz,
+                value: 0
+            })
+        ));
     }
 }
