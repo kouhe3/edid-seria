@@ -69,11 +69,24 @@ up CEA-861 preset timings with CVT 1.1 as fallback. Mirrors CRU's
 AutomaticPC/AutomaticHDTV behavior; the CVT port is verified against
 `cvt12.c` and the preset tables against CRU's source.
 
+### 5. Strict APIs are additive and lossless by default
+
+The compatibility serializer remains available for existing callers, but new
+code should use `serialize_resolutions_checked` or `serialize_timings`. These
+APIs reject malformed block sequences, bad checksums, unsupported base-block
+versions, invalid DTD fields, and unavailable slots with structured errors.
+
+The strict parser aggregates the base block and extensions, identifies CTA-861,
+DisplayID, and unknown extension tags, and preserves unknown raw bytes. CTA and
+DisplayID generation remains out of scope.
+
 ## Consequences
 
-- The serializer never emits a timing it cannot represent (verified: 0
-  silently-truncated DTDs in the corpus round-trip).
+- Strict serialization never emits a timing it cannot represent and never
+  silently drops malformed existing input.
 - Round-trips are byte-exact for digital separate sync DTDs (bytes 0-11,
   15-16 and polarity bits), and flag-normalized for analog/composite ones.
 - `DetailedTiming` gained `h_border`/`v_border` fields to make border
   handling lossless.
+- Interlaced DTD flags are available through the flagged DTD API; the legacy
+  `read_detailed` view remains progressive-only.

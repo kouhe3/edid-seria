@@ -18,7 +18,7 @@ jobs:
     name: fmt + clippy + test + doc + package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,11 +41,26 @@ jobs:
       - name: Package
         run: cargo package
 
+
+  platform:
+    name: library checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test library and integration targets
+        run: cargo test --all-targets
   msrv:
     name: MSRV 1.95
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@1.95
 

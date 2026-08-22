@@ -1,0 +1,349 @@
+//! Structured errors for strict EDID parsing and validation.
+
+use std::fmt;
+
+/// Errors returned when an EDID block cannot be accepted by the strict parser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EdidError {
+    /// The input is not exactly one complete EDID block.
+    InvalidLength {
+        /// Required EDID block length.
+        expected: usize,
+        /// Actual input length.
+        actual: usize,
+    },
+    /// A base block does not begin with the required EDID header.
+    InvalidHeader,
+    /// The block bytes do not sum to zero modulo 256.
+    InvalidChecksum {
+        /// Sum of all block bytes modulo 256.
+        sum: u8,
+    },
+    /// The input is not a whole sequence of EDID blocks.
+    InvalidBlockSequenceLength {
+        /// Actual input length in bytes.
+        actual: usize,
+    },
+    /// The base block's extension count disagrees with the supplied blocks.
+    ExtensionCountMismatch {
+        /// Count declared by the base block.
+        declared: usize,
+        /// Number of extension blocks supplied.
+        actual: usize,
+    },
+    /// The base block uses an unsupported EDID version.
+    UnsupportedVersion {
+        /// EDID major version.
+        major: u8,
+        /// EDID minor version.
+        minor: u8,
+    },
+}
+
+/// Errors returned while decoding or encoding base-block metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetadataError {
+    /// The block does not contain the EDID base-block header.
+    NotBaseBlock,
+    /// Manufacturer ID contains a value outside A-Z.
+    InvalidManufacturerId,
+    /// Manufacturer ID contains a non-uppercase ASCII character.
+    InvalidManufacturerCharacter {
+        /// Character position in the three-letter ID.
+        index: usize,
+        /// Invalid character value.
+        character: char,
+    },
+    /// Manufacture year cannot be represented by the EDID year offset.
+    InvalidManufactureYear {
+        /// Supplied absolute year.
+        year: u16,
+    },
+    /// Gamma is outside the EDID representable range, in hundredths.
+    InvalidGamma {
+        /// Supplied gamma multiplied by 100.
+        value: u16,
+    },
+}
+
+impl fmt::Display for MetadataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotBaseBlock => f.write_str("block is not an EDID base block"),
+            Self::InvalidManufacturerId => f.write_str("invalid EDID manufacturer ID"),
+            Self::InvalidManufacturerCharacter { index, character } => {
+                write!(
+                    f,
+                    "invalid manufacturer character {character:?} at index {index}"
+                )
+            }
+            Self::InvalidManufactureYear { year } => {
+                write!(f, "manufacture year {year} is outside the EDID range")
+            }
+            Self::InvalidGamma { value } => {
+                write!(f, "gamma value {value} is outside the EDID range")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MetadataError {}
+
+/// Errors returned while decoding or encoding monitor descriptors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DescriptorError {
+    /// The requested descriptor slot does not exist.
+    SlotOutOfRange {
+        /// Requested slot index.
+        slot: usize,
+        /// Number of descriptor slots.
+        slots: usize,
+    },
+    /// The block does not contain the EDID base-block header.
+    NotBaseBlock,
+    /// Text is longer than the 13-byte descriptor payload.
+    TextTooLong {
+        /// Maximum text length in bytes.
+        max: usize,
+        /// Supplied text length in bytes.
+        actual: usize,
+    },
+    /// Text contains a character that cannot be encoded in an EDID descriptor.
+    NonAsciiText,
+    /// A range-limit field is outside its one-byte EDID representation.
+    RangeOutOfBounds,
+}
+impl fmt::Display for DescriptorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SlotOutOfRange { slot, slots } => {
+                write!(
+                    f,
+                    "descriptor slot {slot} is out of range ({} slots)",
+                    slots
+                )
+            }
+            Self::NotBaseBlock => f.write_str("block is not an EDID base block"),
+            Self::TextTooLong { max, actual } => {
+                write!(f, "descriptor text is {actual} bytes, maximum is {max}")
+            }
+            Self::NonAsciiText => f.write_str("descriptor text must be ASCII"),
+            Self::RangeOutOfBounds => f.write_str("descriptor range field is out of bounds"),
+        }
+    }
+}
+
+impl std::error::Error for DescriptorError {}
+
+/// DTD field that failed a representability check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DtdField {
+    /// Horizontal active pixels.
+    HorizontalActive,
+    /// Vertical active lines.
+    VerticalActive,
+    /// Horizontal blanking pixels.
+    HorizontalBlanking,
+    /// Vertical blanking lines.
+    VerticalBlanking,
+    /// Horizontal front porch pixels.
+    HorizontalFrontPorch,
+    /// Horizontal sync width in pixels.
+    HorizontalSync,
+    /// Vertical front porch lines.
+    VerticalFrontPorch,
+    /// Vertical sync width in lines.
+    VerticalSync,
+    /// Horizontal border pixels.
+    HorizontalBorder,
+    /// Vertical border lines.
+    VerticalBorder,
+    /// Pixel clock in kHz.
+    PixelClockKHz,
+}
+
+/// Errors returned when a timing cannot be represented by an EDID DTD.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DtdError {
+    /// The requested DTD slot does not exist.
+    SlotOutOfRange {
+        /// Requested slot index.
+        slot: usize,
+        /// Number of available DTD slots.
+        slots: usize,
+    },
+    /// A field has an invalid value even though it fits its bit width.
+    InvalidField {
+        /// Field with the invalid value.
+        field: DtdField,
+        /// Supplied field value.
+        value: u32,
+    },
+    /// A field exceeds its EDID bit-field limit.
+    FieldOutOfRange {
+        /// Field that exceeded its limit.
+        field: DtdField,
+        /// Supplied field value.
+        value: u32,
+        /// Largest representable field value.
+        max: u32,
+    },
+    /// An intermediate timing calculation overflowed.
+    ArithmeticOverflow,
+    /// The block has fewer reusable DTD slots than requested timings.
+    NoAvailableSlot {
+        /// Number of requested timings.
+        requested: usize,
+        /// Number of reusable slots.
+        available: usize,
+    },
+}
+impl fmt::Display for DtdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SlotOutOfRange { slot, slots } => {
+                write!(f, "DTD slot {slot} is out of range ({} slots)", slots)
+            }
+            Self::InvalidField { field, value } => {
+                write!(f, "DTD field {field:?} has invalid value {value}")
+            }
+            Self::FieldOutOfRange { field, value, max } => {
+                write!(f, "DTD field {field:?} value {value} exceeds {max}")
+            }
+            Self::NoAvailableSlot {
+                requested,
+                available,
+            } => write!(
+                f,
+                "requested {requested} timings but only {available} DTD slots are available"
+            ),
+            Self::ArithmeticOverflow => f.write_str("DTD timing arithmetic overflowed"),
+        }
+    }
+}
+
+impl std::error::Error for DtdError {}
+
+/// Errors returned by the strict resolution-to-EDID serializer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SerializeError {
+    /// Existing input is not an integral sequence of EDID blocks.
+    InvalidExistingLength {
+        /// Actual input length in bytes.
+        actual: usize,
+    },
+    /// An existing block failed strict validation.
+    InvalidExistingBlock {
+        /// Zero-based block index.
+        index: usize,
+        /// Validation failure from that block.
+        source: EdidError,
+    },
+    /// The base block's extension count disagrees with the supplied blocks.
+    ExtensionCountMismatch {
+        /// Count declared by the base block.
+        declared: usize,
+        /// Number of extension blocks supplied.
+        actual: usize,
+    },
+    /// A requested resolution could not produce a timing.
+    TimingUnavailable {
+        /// Zero-based resolution index.
+        index: usize,
+    },
+    /// A computed timing exceeds DTD field limits.
+    TimingDoesNotFit {
+        /// Zero-based resolution index.
+        index: usize,
+    },
+    /// No reusable DTD slot remains for a requested timing.
+    NoDtdSlot {
+        /// Zero-based resolution index that could not be written.
+        index: usize,
+    },
+    /// A manually supplied timing failed DTD validation.
+    InvalidTiming {
+        /// Zero-based timing index.
+        index: usize,
+        /// DTD validation failure.
+        source: DtdError,
+    },
+    /// The extension count cannot be represented by the base block byte.
+    TooManyExtensions {
+        /// Number of extension blocks supplied.
+        count: usize,
+    },
+}
+
+impl fmt::Display for SerializeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidExistingLength { actual } => {
+                write!(
+                    f,
+                    "existing EDID length {actual} is not a whole block sequence"
+                )
+            }
+            Self::InvalidExistingBlock { index, source } => {
+                write!(f, "existing EDID block {index} is invalid: {source}")
+            }
+            Self::ExtensionCountMismatch { declared, actual } => write!(
+                f,
+                "EDID declares {declared} extension blocks but supplied {actual}"
+            ),
+            Self::TooManyExtensions { count } => {
+                write!(f, "EDID contains too many extension blocks: {count}")
+            }
+            Self::TimingUnavailable { index } => {
+                write!(f, "resolution {index} could not produce a timing")
+            }
+            Self::TimingDoesNotFit { index } => {
+                write!(f, "resolution {index} does not fit an EDID DTD")
+            }
+            Self::NoDtdSlot { index } => {
+                write!(f, "no DTD slot is available for resolution {index}")
+            }
+            Self::InvalidTiming { index, source } => {
+                write!(f, "timing {index} is invalid: {source}")
+            }
+        }
+    }
+}
+impl std::error::Error for SerializeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidExistingBlock { source, .. } => Some(source),
+            Self::InvalidTiming { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for EdidError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLength { expected, actual } => {
+                write!(
+                    f,
+                    "invalid EDID block length: expected {expected}, got {actual}"
+                )
+            }
+            Self::InvalidBlockSequenceLength { actual } => {
+                write!(f, "invalid EDID block sequence length: got {actual} bytes")
+            }
+            Self::InvalidHeader => f.write_str("invalid EDID base-block header"),
+            Self::InvalidChecksum { sum } => {
+                write!(f, "invalid EDID checksum: byte sum modulo 256 is {sum}")
+            }
+            Self::ExtensionCountMismatch { declared, actual } => write!(
+                f,
+                "EDID declares {declared} extension blocks but supplied {actual}"
+            ),
+            Self::UnsupportedVersion { major, minor } => {
+                write!(f, "unsupported EDID version {major}.{minor}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EdidError {}

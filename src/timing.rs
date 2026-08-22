@@ -65,23 +65,88 @@ impl DetailedTiming {
             })
             .cloned()
     }
+
+    /// Look up a standard HDTV/CEA timing without considering PC presets.
+    #[must_use]
+    pub fn compute_hdtv_blanking(width: u32, height: u32, refresh: f64) -> Option<DetailedTiming> {
+        hdtv_presets().into_iter().find(|preset| {
+            preset.h_active == width
+                && preset.v_active == height
+                && (preset.v_rate - refresh).abs() < 0.5
+        })
+    }
 }
 
-/// EDID DTD field limits (E-EDID 1.4 §3.10.2). A timing that exceeds any of
-/// them would be silently truncated by the low-level writer, so reject it.
+/// EDID DTD field limits (E-EDID 1.4 §3.10.2).
+///
+/// Unlike [`dtd_fits`], this function reports the first invalid field and uses
+/// checked arithmetic for blanking totals. Pixel clocks below 10 MHz are
+/// rejected because the EDID reader treats them as invalid timing data.
+pub fn validate_dtd(t: &DetailedTiming) -> Result<(), crate::error::DtdError> {
+    use crate::error::{DtdError, DtdField};
+
+    fn limit(field: DtdField, value: u32, max: u32) -> Result<(), DtdError> {
+        if value > max {
+            Err(DtdError::FieldOutOfRange { field, value, max })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn positive(field: DtdField, value: u32, max: u32) -> Result<(), DtdError> {
+        if value == 0 {
+            Err(DtdError::InvalidField { field, value })
+        } else {
+            limit(field, value, max)
+        }
+    }
+
+    positive(DtdField::HorizontalActive, t.h_active, 4095)?;
+    positive(DtdField::VerticalActive, t.v_active, 4095)?;
+    limit(DtdField::HorizontalFrontPorch, t.h_front, 1023)?;
+    limit(DtdField::HorizontalSync, t.h_sync, 1023)?;
+    limit(DtdField::VerticalFrontPorch, t.v_front, 63)?;
+    limit(DtdField::VerticalSync, t.v_sync, 63)?;
+    limit(DtdField::HorizontalBorder, t.h_border, 255)?;
+    limit(DtdField::VerticalBorder, t.v_border, 255)?;
+    if t.pixel_clock_khz < 10_000 {
+        return Err(DtdError::InvalidField {
+            field: DtdField::PixelClockKHz,
+            value: t.pixel_clock_khz,
+        });
+    }
+    limit(DtdField::PixelClockKHz, t.pixel_clock_khz, 655_350)?;
+
+    let h_blank = t
+        .h_front
+        .checked_add(t.h_sync)
+        .and_then(|value| value.checked_add(t.h_back))
+        .and_then(|value| {
+            t.h_border
+                .checked_mul(2)
+                .and_then(|border| value.checked_add(border))
+        })
+        .ok_or(DtdError::ArithmeticOverflow)?;
+    limit(DtdField::HorizontalBlanking, h_blank, 4095)?;
+
+    let v_blank = t
+        .v_front
+        .checked_add(t.v_sync)
+        .and_then(|value| value.checked_add(t.v_back))
+        .and_then(|value| {
+            t.v_border
+                .checked_mul(2)
+                .and_then(|border| value.checked_add(border))
+        })
+        .ok_or(DtdError::ArithmeticOverflow)?;
+    limit(DtdField::VerticalBlanking, v_blank, 4095)?;
+    Ok(())
+}
+
+/// Determine whether a timing fits all EDID DTD fields.
 #[must_use]
 pub fn dtd_fits(t: &DetailedTiming) -> bool {
-    t.h_active <= 4095
-        && t.v_active <= 4095
-        && t.h_front + t.h_sync + t.h_back + 2 * t.h_border <= 4095 // HBlank: 12 bits
-        && t.v_front + t.v_sync + t.v_back + 2 * t.v_border <= 4095 // VBlank: 12 bits
-        && t.h_front <= 1023
-        && t.h_sync <= 1023
-        && t.v_front <= 63
-        && t.v_sync <= 63
-        && t.h_border <= 255
-        && t.v_border <= 255
-        && t.pixel_clock_khz <= 655_350 // 655.35 MHz: 16 bits of 10 kHz
+    validate_dtd(t).is_ok()
 }
 fn pc_presets() -> Vec<DetailedTiming> {
     vec![
@@ -706,12 +771,82 @@ fn hdtv_presets() -> Vec<DetailedTiming> {
     ]
 }
 
+fn common_wide_presets() -> Vec<DetailedTiming> {
+    vec![
+        DetailedTiming {
+            h_active: 1280,
+            v_active: 800,
+            h_front: 48,
+            h_sync: 32,
+            h_back: 80,
+            v_front: 3,
+            v_sync: 6,
+            v_back: 22,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 71800,
+            h_pol: true,
+            v_pol: false,
+            v_rate: 60.0,
+        },
+        DetailedTiming {
+            h_active: 1920,
+            v_active: 1200,
+            h_front: 48,
+            h_sync: 32,
+            h_back: 80,
+            v_front: 3,
+            v_sync: 6,
+            v_back: 26,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 154130,
+            h_pol: true,
+            v_pol: false,
+            v_rate: 60.0,
+        },
+        DetailedTiming {
+            h_active: 2560,
+            v_active: 1440,
+            h_front: 48,
+            h_sync: 32,
+            h_back: 80,
+            v_front: 3,
+            v_sync: 5,
+            v_back: 33,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 241700,
+            h_pol: true,
+            v_pol: false,
+            v_rate: 60.0,
+        },
+        DetailedTiming {
+            h_active: 3440,
+            v_active: 1440,
+            h_front: 48,
+            h_sync: 32,
+            h_back: 80,
+            v_front: 3,
+            v_sync: 5,
+            v_back: 33,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 319900,
+            h_pol: true,
+            v_pol: false,
+            v_rate: 60.0,
+        },
+    ]
+}
+
 /// All PC and HDTV preset timings, built once and returned as a static slice.
 #[must_use]
 pub fn all_presets() -> &'static [DetailedTiming] {
     use std::sync::LazyLock;
     static PRESETS: LazyLock<Vec<DetailedTiming>> = LazyLock::new(|| {
         let mut v = pc_presets();
+        v.extend(common_wide_presets());
         v.extend(hdtv_presets());
         v
     });
@@ -775,7 +910,7 @@ pub fn compute_cvt(
     freq: f64,
     formula: TimingFormula,
 ) -> Option<DetailedTiming> {
-    if h_pixels == 0 || v_lines == 0 || freq <= 0.0 || freq > 1000.0 {
+    if h_pixels == 0 || v_lines == 0 || !freq.is_finite() || freq <= 0.0 || freq > 1000.0 {
         return None;
     }
     let reduced = match formula {
@@ -784,7 +919,6 @@ pub fn compute_cvt(
         TimingFormula::CVTRB => 1,
         TimingFormula::CVTRB2 => 2,
     };
-
     let (clock_step, cell_gran, min_v_bporch, rb_v_fporch, rb_h_blank, v_sync_fixed) =
         if reduced == 2 {
             (
@@ -1004,10 +1138,25 @@ mod tests {
         assert!(t.v_front > 0);
         assert!(t.v_back > 0);
         let h_total = t.h_active + t.h_front + t.h_sync + t.h_back;
+
         let v_total = t.v_active + t.v_front + t.v_sync + t.v_back;
         assert!(h_total > t.h_active);
         assert!(v_total > t.v_active);
         assert!((t.v_rate - 60.0).abs() < 0.5);
+    }
+    #[test]
+    fn common_wide_and_high_resolution_presets_are_available() {
+        for &(width, height, refresh) in &[
+            (1280, 800, 60.0),
+            (1920, 1200, 60.0),
+            (2560, 1440, 60.0),
+            (3440, 1440, 60.0),
+        ] {
+            assert!(
+                DetailedTiming::compute_blanking(width, height, refresh).is_some(),
+                "missing preset {width}x{height}@{refresh}"
+            );
+        }
     }
 
     #[test]
@@ -1041,7 +1190,131 @@ mod tests {
         assert!(compute_cvt(0, 1080, 60.0, TimingFormula::CVT).is_none());
         assert!(compute_cvt(1920, 0, 60.0, TimingFormula::CVT).is_none());
         assert!(compute_cvt(1920, 1080, 0.0, TimingFormula::CVT).is_none());
+        assert!(compute_cvt(1920, 1080, f64::NAN, TimingFormula::CVT).is_none());
+        assert!(compute_cvt(1920, 1080, f64::INFINITY, TimingFormula::CVT).is_none());
         assert!(compute_cvt(1920, 1080, 5000.0, TimingFormula::CVT).is_none());
         assert!(compute_cvt(1920, 1080, 60.0, TimingFormula::Manual).is_none());
+    }
+    #[test]
+    fn dtd_validation_reports_field_limits_without_overflow() {
+        let mut timing = DetailedTiming {
+            h_active: 1,
+            v_active: 1,
+            h_front: u32::MAX,
+            h_sync: 0,
+            h_back: 0,
+            v_front: 0,
+            v_sync: 0,
+            v_back: 0,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 1,
+            h_pol: false,
+            v_pol: false,
+            v_rate: 1.0,
+        };
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::FieldOutOfRange {
+                field: crate::error::DtdField::HorizontalFrontPorch,
+                ..
+            })
+        ));
+        timing.pixel_clock_khz = 10_000;
+
+        timing.h_front = 1023;
+        timing.h_sync = 1023;
+        timing.h_back = u32::MAX;
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::FieldOutOfRange {
+                field: crate::error::DtdField::HorizontalBlanking,
+                ..
+            }) | Err(crate::error::DtdError::ArithmeticOverflow)
+        ));
+    }
+
+    #[test]
+    fn dtd_validation_accepts_canonical_timing() {
+        let timing = DetailedTiming {
+            h_active: 1920,
+            v_active: 1080,
+            h_front: 88,
+            h_sync: 44,
+            h_back: 148,
+            v_front: 4,
+            v_sync: 5,
+            v_back: 36,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 148500,
+            h_pol: true,
+            v_pol: true,
+            v_rate: 60.0,
+        };
+        assert_eq!(validate_dtd(&timing), Ok(()));
+    }
+    #[test]
+    fn dtd_validation_rejects_zero_active_or_clock() {
+        let mut timing = DetailedTiming {
+            h_active: 1920,
+            v_active: 1080,
+            h_front: 88,
+            h_sync: 44,
+            h_back: 148,
+            v_front: 4,
+            v_sync: 5,
+            v_back: 36,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 148500,
+            h_pol: true,
+            v_pol: true,
+            v_rate: 60.0,
+        };
+        timing.h_active = 0;
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::InvalidField {
+                field: crate::error::DtdField::HorizontalActive,
+                value: 0
+            })
+        ));
+
+        timing.h_active = 1920;
+        timing.pixel_clock_khz = 0;
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::InvalidField {
+                field: crate::error::DtdField::PixelClockKHz,
+                value: 0
+            })
+        ));
+    }
+    #[test]
+    fn dtd_validation_rejects_unreadable_low_pixel_clock() {
+        let timing = DetailedTiming {
+            h_active: 1920,
+            v_active: 1080,
+            h_front: 88,
+            h_sync: 44,
+            h_back: 148,
+            v_front: 4,
+            v_sync: 5,
+            v_back: 36,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 9,
+            h_pol: true,
+            v_pol: true,
+            v_rate: 60.0,
+        };
+        assert!(matches!(
+            validate_dtd(&timing),
+            Err(crate::error::DtdError::InvalidField {
+                field: crate::error::DtdField::PixelClockKHz,
+                value: 9
+            })
+        ));
     }
 }

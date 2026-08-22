@@ -8,17 +8,24 @@ CRU-style display override tools.
 
 ## Features
 
-- **DTD read/write** — byte-exact round-trips of detailed timing descriptors,
-  including borders and sync-type-aware polarity decoding (verified against
-  edid-decode over ~49,000 real monitor EDIDs).
+ - **DTD read/write** — field-level encoding and decoding of detailed timing
+   descriptors, including borders and sync-type-aware polarity decoding.
 - **CVT computation** — CVT 1.1 normal blanking, CVT-RB, and CVT-RB2
   (validated field-by-field against the `cvt12.c` reference implementation).
-- **Preset tables** — PC (VESA) and HDTV (CEA-861) standard timings matching
-  CRU's automatic tables.
+ - **Preset tables** — PC (VESA), common wide-screen, and HDTV (CEA-861)
+   timings; the HDTV table covers common modes, not every CEA VIC.
 - **Safe serialization** — rewrites the base block's DTD slots while
   preserving monitor descriptors (name, serial, range limits) and extension
   blocks; rejects timings that cannot be represented in a DTD instead of
   silently truncating them.
+ - **Strict parsing** — validated complete EDID sequences with base-header,
+   checksum, version, extension-count, and structured error reporting.
+ - **Metadata and descriptors** — typed base-block identity fields and common
+   monitor descriptors, with unknown descriptor payload preservation.
+ - **Manual and interlaced DTD access** — strict manual timing serialization
+   plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
+ - **Extension views** — CTA-861 data-block inspection and DisplayID/unknown
+   extension identification while preserving raw extension blocks.
 - **`#![deny(unsafe_code)]`**, no panics on arbitrary EDID input, MSRV 1.95.
 
 ## Quick start
@@ -50,6 +57,22 @@ assert_eq!(res.skipped, 0); // 0 = every requested mode was written
 fs::write("override.bin", &res.bytes)?;
 ```
 
+## Core-library boundaries
+
+The library is platform-independent. It does not enumerate displays, access the
+Windows registry, request elevation, or apply driver overrides. CTA-861 and
+DisplayID blocks are currently inspected read-only; their data is preserved but
+not generated or rearranged.
+
+`serialize_resolutions` retains its compatibility behavior: malformed or
+partial input may fall back or be skipped. New code should use
+`serialize_resolutions_checked` or `serialize_timings`, which reject malformed
+input, invalid timings, and unavailable DTD slots with structured errors.
+
+The strict DTD API is byte-precise for representable fields. New writes
+normalize flags to digital separate sync unless the explicit flagged writer is
+used; analog/composite semantics are not inferred by the progressive-only view.
+
 ## Commands
 
 | Command | Description |
@@ -59,27 +82,36 @@ fs::write("override.bin", &res.bytes)?;
 | `cargo doc --no-deps` | Build documentation (`missing_docs` is a warning) |
 | `cargo package` | Verify the publishable package |
 
+The optional fuzz target is under `fuzz/` and can be run with
+`cargo-fuzz` after installing that tool.
+
 ## Architecture
 
 | Module | Responsibility |
 |--------|----------------|
-| [`timing`](src/timing.rs) | `DetailedTiming` model, preset tables, CVT computation, `dtd_fits` field-limit check |
-| [`edid`](src/edid.rs) | 18-byte DTD bit-packing, slot classification, base-block read/write, checksum |
-| [`serialize`](src/serialize.rs) | Resolution → EDID pipeline: compute DTDs, rewrite slots, preserve descriptors, fix checksums |
+| [`timing`](src/timing.rs) | `DetailedTiming` model, preset tables, CVT computation, DTD field-limit checks |
+| [`edid`](src/edid.rs) | DTD bit-packing, slot classification, validated EDID blocks, checksums, flagged DTD access |
+| [`metadata`](src/metadata.rs) | Base-block metadata and monitor descriptor decoding/encoding |
+| [`extensions`](src/extensions.rs) | CTA-861 data-block views and extension-kind detection |
+| [`serialize`](src/serialize.rs) | Resolution/manual timing → EDID pipeline with strict and compatibility APIs |
+| [`error`](src/error.rs) | Structured parsing, DTD, metadata, descriptor, and serialization errors |
 
 Key design decisions are recorded in [docs/decisions](docs/decisions/).
 
 ## Contributing
 
-PRs welcome. CI runs `fmt`, `clippy -D warnings`, tests, and rustdoc on every
-push and pull request; the same gates must pass locally:
+PRs welcome. CI runs `fmt`, `clippy -D warnings`, tests, rustdoc, package, and
+library checks on Linux, Windows, and macOS; the same gates must pass locally:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo test --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
+
+The corpus/property smoke tests live in `tests/core_regression.rs`; the
+libFuzzer parser target lives in `fuzz/fuzz_targets/parse_edid.rs`.
 
 ## License
 
