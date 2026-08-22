@@ -20,7 +20,10 @@ pub use error::{
     DescriptorError, DtdError, DtdField, EdidError, MetadataError, MetadataWriteError,
     SerializeError,
 };
-pub use extensions::{CtaDataBlock, ExtensionError, ExtensionKind};
+pub use extensions::{
+    CtaAudioDescriptor, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVideoMode,
+    ExtensionError, ExtensionKind,
+};
 pub use metadata::{
     BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, EstablishedTiming,
     EstablishedTimings, MonitorDescriptor, StandardTiming, StandardTimingAspectRatio,

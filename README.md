@@ -25,8 +25,9 @@ CRU-style display override tools.
    monitor descriptors, with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
- - **Extension views** — CTA-861 data-block inspection and DisplayID/unknown
-   extension identification while preserving raw extension blocks.
+ - **Extension views** — typed read-only CTA video/audio/HDR Static Metadata and
+   Adaptive-Sync data-block views, plus raw unknown CTA/DisplayID extension
+   preservation. Extension generation/reordering remains out of scope.
 - **`#![deny(unsafe_code)]`**, no panics on arbitrary EDID input, MSRV 1.95.
 
 ## Quick start

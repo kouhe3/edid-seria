@@ -57,3 +57,43 @@ fn extension_kind_exposes_extension_metadata() {
         edid_seria::ExtensionKind::DisplayId { version: 0x20 }
     ));
 }
+
+#[test]
+fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
+    use edid_seria::{CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVideoMode};
+
+    let video = CtaDataBlock {
+        tag: 2,
+        payload: vec![0x80 | 16],
+    };
+    assert_eq!(
+        video.view().unwrap(),
+        CtaDataBlockView::Video {
+            modes: vec![CtaVideoMode {
+                vic: 16,
+                native: true,
+            }],
+        }
+    );
+
+    let hdr = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x06, 0x07, 0x01],
+    };
+    assert!(matches!(
+        hdr.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata { .. })
+    ));
+
+    let unknown = CtaDataBlock {
+        tag: 3,
+        payload: vec![0xAA, 0xBB],
+    };
+    assert_eq!(
+        unknown.view().unwrap(),
+        CtaDataBlockView::Unknown {
+            tag: 3,
+            payload: vec![0xAA, 0xBB],
+        }
+    );
+}
