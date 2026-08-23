@@ -180,7 +180,9 @@ impl DetailedTiming {
         let v_total = parse_u32(tokens[idx + 8])?;
 
         if h_active == 0 || v_active == 0 {
-            return Err(ModelineError::InvalidGeometry("active area must be non-zero"));
+            return Err(ModelineError::InvalidGeometry(
+                "active area must be non-zero",
+            ));
         }
         if h_sync_start < h_active {
             return Err(ModelineError::InvalidGeometry("hsync start < hactive"));
@@ -201,7 +203,9 @@ impl DetailedTiming {
             return Err(ModelineError::InvalidGeometry("vtotal < vsync end"));
         }
         if h_total == 0 || v_total == 0 {
-            return Err(ModelineError::InvalidGeometry("total area must be non-zero"));
+            return Err(ModelineError::InvalidGeometry(
+                "total area must be non-zero",
+            ));
         }
         let pixel_clock_khz = (dot_clock_mhz * 1000.0).round() as u32;
         let h_front = h_sync_start - h_active;
@@ -1494,8 +1498,7 @@ mod tests {
         assert!(!parsed_raw.v_pol);
 
         // Mode name with spaces in quotes
-        let spaced_name =
-            "Modeline \"1920x1080 @ 60Hz\" 148.50 1920 2008 2052 2200 1080 1084 1089 1125 +hsync +vsync";
+        let spaced_name = "Modeline \"1920x1080 @ 60Hz\" 148.50 1920 2008 2052 2200 1080 1084 1089 1125 +hsync +vsync";
         let parsed_spaced = DetailedTiming::from_modeline(spaced_name).unwrap();
         assert_eq!(parsed_spaced.h_active, 1920);
         assert_eq!(parsed_spaced.pixel_clock_khz, 148500);
@@ -1520,8 +1523,7 @@ mod tests {
             Err(ModelineError::InvalidGeometry(_))
         ));
 
-        let zero_area =
-            "Modeline \"zero\" 148.50 0 0 0 0 1080 1084 1089 1125 +hsync +vsync";
+        let zero_area = "Modeline \"zero\" 148.50 0 0 0 0 1080 1084 1089 1125 +hsync +vsync";
         assert!(matches!(
             DetailedTiming::from_modeline(zero_area),
             Err(ModelineError::InvalidGeometry(_))
