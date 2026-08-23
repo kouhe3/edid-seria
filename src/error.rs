@@ -89,6 +89,65 @@ impl fmt::Display for MetadataError {
 
 impl std::error::Error for MetadataError {}
 
+/// Errors returned while encoding the newly added base-block metadata views.
+///
+/// This is separate from [`MetadataError`] so existing exhaustive matches on
+/// that public 0.1 enum remain source-compatible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetadataWriteError {
+    /// The block does not contain the EDID base-block header.
+    NotBaseBlock,
+    /// A chromaticity coordinate exceeds its 10-bit EDID representation.
+    InvalidChromaticityValue {
+        /// Supplied encoded coordinate value.
+        value: u16,
+    },
+    /// A standard timing cannot be represented by its two-byte encoding.
+    InvalidStandardTiming {
+        /// Supplied horizontal active size.
+        horizontal_pixels: u16,
+        /// Supplied refresh rate.
+        refresh_rate_hz: u8,
+    },
+    /// A standard timing collides with the EDID unused-slot encoding.
+    ReservedStandardTimingEncoding,
+    /// A reserved standard-timing entry contains a valid mode encoding.
+    InvalidReservedStandardTimingEncoding {
+        /// Original two-byte encoding.
+        raw: [u8; 2],
+    },
+}
+
+impl fmt::Display for MetadataWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotBaseBlock => f.write_str("block is not an EDID base block"),
+            Self::InvalidChromaticityValue { value } => {
+                write!(
+                    f,
+                    "chromaticity value {value} exceeds the 10-bit EDID range"
+                )
+            }
+            Self::InvalidStandardTiming {
+                horizontal_pixels,
+                refresh_rate_hz,
+            } => write!(
+                f,
+                "standard timing {horizontal_pixels} pixels at {refresh_rate_hz} Hz is not representable"
+            ),
+            Self::ReservedStandardTimingEncoding => {
+                f.write_str("standard timing collides with the EDID unused-slot encoding")
+            }
+            Self::InvalidReservedStandardTimingEncoding { raw } => write!(
+                f,
+                "reserved standard timing encoding {raw:02X?} is a valid mode encoding"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MetadataWriteError {}
+
 /// Errors returned while decoding or encoding monitor descriptors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DescriptorError {

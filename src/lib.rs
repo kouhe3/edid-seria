@@ -16,9 +16,20 @@ pub mod metadata;
 pub mod serialize;
 pub mod timing;
 pub use edid::{DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock};
-pub use error::{DescriptorError, DtdError, DtdField, EdidError, MetadataError, SerializeError};
-pub use extensions::{CtaDataBlock, ExtensionError, ExtensionKind};
-pub use metadata::{BaseMetadata, MonitorDescriptor};
+pub use error::{
+    DescriptorError, DtdError, DtdField, EdidError, MetadataError, MetadataWriteError,
+    SerializeError,
+};
+pub use extensions::{
+    CtaAudioDescriptor, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVideoMode,
+    DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
+    DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
+};
+pub use metadata::{
+    BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, EstablishedTiming,
+    EstablishedTimings, MonitorDescriptor, StandardTiming, StandardTimingAspectRatio,
+    StandardTimingEntry,
+};
 pub use serialize::{
     ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions,
     serialize_resolutions_checked, serialize_timings,
