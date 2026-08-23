@@ -25,10 +25,8 @@ CRU-style display override tools.
    monitor descriptors (name, serial, alphanumeric string, color point, additional standard timings, range limits, dummy), with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
-- **Extension views** — typed read-only CTA video/audio/VSDB (HDMI 1.4b, HDMI Forum 2.0+)/HDR Static Metadata and
-  Adaptive-Sync data-block views, DisplayID headers, Product Identification,
-  Display Parameters, Type I/Type VII Detailed Timing, embedded CTA, and raw
-  unknown-block views. Extension generation/reordering remains out of scope.
+- **Extension views** — typed read-only CTA-861 views (header/capabilities, video, audio, speaker allocation, HDMI 1.4b/2.0+, AMD FreeSync, Dolby Vision VSDBs, colorimetry, video capability, HDR static metadata, Adaptive-Sync, and CTA DTD iteration), DisplayID headers, Product Identification, Display Parameters, Type I/Type VII Detailed Timing, embedded CTA, and raw unknown-block views. Extension generation/reordering remains out of scope.
+- **High-level display inspection** — convenient `Edid` helpers (`monitor_name()`, `serial_number()`, `preferred_timing()`, `all_detailed_timings()`) that aggregate Base and CTA extension descriptors.
 - **Modeline and Hex interoperability** — X11/xrandr Modeline string formatting and
   parsing, and flexible EDID hex string (compact, formatted, C-array) import/export.
 - **`#![deny(unsafe_code)]`**, no panics on arbitrary EDID input, MSRV 1.95.

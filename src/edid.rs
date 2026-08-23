@@ -158,53 +158,7 @@ impl EdidBlock {
             return None;
         }
         let off = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
-        let d = &self.raw[off..off + EDID_DESCRIPTOR_LEN];
-        if d.iter().all(|&byte| byte == 0x01) {
-            return None;
-        }
-        let pixel_clock = u16::from_le_bytes([d[0], d[1]]);
-        if pixel_clock == 0 || pixel_clock < 1000 {
-            return None;
-        }
-        let h_border = d[15] as u16;
-        let v_border = d[16] as u16;
-        let h_active = d[2] as u16 | ((d[4] as u16 & 0xF0) << 4);
-        let h_blank = (d[3] as u16 | ((d[4] as u16 & 0x0F) << 8)).saturating_sub(h_border * 2);
-        let v_active = d[5] as u16 | ((d[7] as u16 & 0xF0) << 4);
-        let v_blank = (d[6] as u16 | ((d[7] as u16 & 0x0F) << 8)).saturating_sub(v_border * 2);
-        let h_front = d[8] as u16 | ((d[11] as u16 & 0xC0) << 2);
-        let h_sync = d[9] as u16 | ((d[11] as u16 & 0x30) << 4);
-        let v_front = (d[10] as u16 >> 4) | ((d[11] as u16 & 0x0C) << 2);
-        let v_sync = (d[10] as u16 & 0x0F) | ((d[11] as u16 & 0x03) << 4);
-        let h_back = h_blank.saturating_sub(h_front + h_sync);
-        let v_back = v_blank.saturating_sub(v_front + v_sync);
-
-        let sync_type = (d[17] >> 3) & 0x03;
-        let h_pol = sync_type >= 0x02 && d[17] & 0x02 != 0;
-        let v_pol = sync_type == 0x03 && d[17] & 0x04 != 0;
-        let h_total = h_active + h_blank;
-        let v_total = v_active + v_blank;
-        let v_rate = (pixel_clock as f64 * 10_000.0) / (h_total as f64 * v_total as f64);
-
-        Some(DecodedDtd {
-            timing: DetailedTiming {
-                h_active: h_active as u32,
-                v_active: v_active as u32,
-                h_front: h_front as u32,
-                h_sync: h_sync as u32,
-                h_back: h_back as u32,
-                v_front: v_front as u32,
-                v_sync: v_sync as u32,
-                v_back: v_back as u32,
-                h_border: h_border as u32,
-                v_border: v_border as u32,
-                pixel_clock_khz: pixel_clock as u32 * 10,
-                h_pol,
-                v_pol,
-                v_rate,
-            },
-            flags: DtdFlags { raw: d[17] },
-        })
+        decode_dtd_bytes(&self.raw[off..off + EDID_DESCRIPTOR_LEN])
     }
     /// Validate fields specific to an EDID base block.
     pub(crate) fn validate_base(&self) -> Result<(), EdidError> {
@@ -394,7 +348,6 @@ impl EdidBlock {
                 available: slots.len(),
             });
         }
-
         let mut written = 0;
         for (index, timing) in timings.iter().enumerate() {
             if let Some(&slot) = slots.get(index) {
@@ -458,6 +411,14 @@ impl EdidBlock {
     pub fn detailed_timings(&self) -> Vec<DetailedTiming> {
         (0..DETAILED_SLOTS)
             .filter_map(|slot| self.read_detailed(slot))
+            .collect()
+    }
+
+    /// Read all detailed timings with flags in this block.
+    #[must_use]
+    pub fn detailed_timings_flagged(&self) -> Vec<DecodedDtd> {
+        (0..DETAILED_SLOTS)
+            .filter_map(|slot| self.read_detailed_with_flags(slot))
             .collect()
     }
 
@@ -603,6 +564,56 @@ impl Edid {
         let bytes = parse_hex_bytes(s)?;
         Self::from_bytes(&bytes).map_err(crate::error::HexError::EdidError)
     }
+
+    /// Return all progressive detailed timings in this EDID (Base block DTDs + CTA-861 DTDs).
+    #[must_use]
+    pub fn all_detailed_timings(&self) -> Vec<DetailedTiming> {
+        let mut timings = self.base.detailed_timings();
+        for ext in &self.extensions {
+            if let Ok(cta_timings) = ext.cta_detailed_timings() {
+                timings.extend(cta_timings);
+            }
+        }
+        timings
+    }
+
+    /// Return all detailed timings with flags in this EDID (Base block DTDs + CTA-861 DTDs).
+    #[must_use]
+    pub fn all_detailed_timings_flagged(&self) -> Vec<DecodedDtd> {
+        let mut dtds = self.base.detailed_timings_flagged();
+        for ext in &self.extensions {
+            if let Ok(cta_dtds) = ext.cta_detailed_timings_flagged() {
+                dtds.extend(cta_dtds);
+            }
+        }
+        dtds
+    }
+
+    /// Return the preferred (first valid) detailed timing for this display, if defined.
+    #[must_use]
+    pub fn preferred_timing(&self) -> Option<DetailedTiming> {
+        self.base
+            .read_detailed(0)
+            .or_else(|| self.all_detailed_timings().into_iter().next())
+    }
+
+    /// Extract the monitor product name from the Base Block descriptors, if present.
+    #[must_use]
+    pub fn monitor_name(&self) -> Option<String> {
+        (0..DETAILED_SLOTS).find_map(|slot| match self.base.monitor_descriptor(slot) {
+            Ok(Some(crate::metadata::MonitorDescriptor::ProductName(name))) => Some(name),
+            _ => None,
+        })
+    }
+
+    /// Extract the monitor serial number string from the Base Block descriptors, if present.
+    #[must_use]
+    pub fn serial_number(&self) -> Option<String> {
+        (0..DETAILED_SLOTS).find_map(|slot| match self.base.monitor_descriptor(slot) {
+            Ok(Some(crate::metadata::MonitorDescriptor::SerialNumber(serial))) => Some(serial),
+            _ => None,
+        })
+    }
 }
 
 pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, crate::error::HexError> {
@@ -671,6 +682,55 @@ pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, crate::error::HexError
     }
 
     Ok(bytes)
+}
+
+pub(crate) fn decode_dtd_bytes(d: &[u8]) -> Option<DecodedDtd> {
+    if d.len() < EDID_DESCRIPTOR_LEN || d.iter().all(|&byte| byte == 0x01) {
+        return None;
+    }
+    let pixel_clock = u16::from_le_bytes([d[0], d[1]]);
+    if pixel_clock == 0 || pixel_clock < 1000 {
+        return None;
+    }
+    let h_border = d[15] as u16;
+    let v_border = d[16] as u16;
+    let h_active = d[2] as u16 | ((d[4] as u16 & 0xF0) << 4);
+    let h_blank = (d[3] as u16 | ((d[4] as u16 & 0x0F) << 8)).saturating_sub(h_border * 2);
+    let v_active = d[5] as u16 | ((d[7] as u16 & 0xF0) << 4);
+    let v_blank = (d[6] as u16 | ((d[7] as u16 & 0x0F) << 8)).saturating_sub(v_border * 2);
+    let h_front = d[8] as u16 | ((d[11] as u16 & 0xC0) << 2);
+    let h_sync = d[9] as u16 | ((d[11] as u16 & 0x30) << 4);
+    let v_front = (d[10] as u16 >> 4) | ((d[11] as u16 & 0x0C) << 2);
+    let v_sync = (d[10] as u16 & 0x0F) | ((d[11] as u16 & 0x03) << 4);
+    let h_back = h_blank.saturating_sub(h_front + h_sync);
+    let v_back = v_blank.saturating_sub(v_front + v_sync);
+
+    let sync_type = (d[17] >> 3) & 0x03;
+    let h_pol = sync_type >= 0x02 && d[17] & 0x02 != 0;
+    let v_pol = sync_type == 0x03 && d[17] & 0x04 != 0;
+    let h_total = h_active + h_blank;
+    let v_total = v_active + v_blank;
+    let v_rate = (pixel_clock as f64 * 10_000.0) / (h_total as f64 * v_total as f64);
+
+    Some(DecodedDtd {
+        timing: DetailedTiming {
+            h_active: h_active as u32,
+            v_active: v_active as u32,
+            h_front: h_front as u32,
+            h_sync: h_sync as u32,
+            h_back: h_back as u32,
+            v_front: v_front as u32,
+            v_sync: v_sync as u32,
+            v_back: v_back as u32,
+            h_border: h_border as u32,
+            v_border: v_border as u32,
+            pixel_clock_khz: pixel_clock as u32 * 10,
+            h_pol,
+            v_pol,
+            v_rate,
+        },
+        flags: DtdFlags { raw: d[17] },
+    })
 }
 
 #[cfg(test)]
@@ -1154,5 +1214,44 @@ mod tests {
             EdidBlock::from_hex("00FFFFFFFFFFFF00"),
             Err(HexError::InvalidLength { bytes: 8 })
         ));
+    }
+
+    #[test]
+    fn edid_aggregate_helpers_and_dtd_enumeration() {
+        let mut base = EdidBlock::new_default();
+        base.write_detailed_checked(0, &make_timing()).unwrap();
+        base.set_monitor_descriptor(
+            1,
+            &crate::metadata::MonitorDescriptor::ProductName("TestMonitor".to_string()),
+        )
+        .unwrap();
+        base.set_monitor_descriptor(
+            2,
+            &crate::metadata::MonitorDescriptor::SerialNumber("SN123456".to_string()),
+        )
+        .unwrap();
+        base.raw[126] = 1; // 1 extension
+        base.update_checksum();
+
+        let mut cta = EdidBlock::new_default();
+        cta.raw[0] = 0x02; // CTA
+        cta.raw[1] = 3;
+        cta.raw[2] = 4; // DTDs at offset 4
+        // Write a DTD in CTA block (1920x1080)
+        let dtd_bytes = base.raw[DETAILED_START..DETAILED_START + 18].to_vec();
+        cta.raw[4..22].copy_from_slice(&dtd_bytes);
+        cta.update_checksum();
+        let mut full_bytes = base.as_bytes().to_vec();
+        full_bytes.extend_from_slice(cta.as_bytes());
+        let edid = Edid::from_bytes(&full_bytes).unwrap();
+        assert_eq!(edid.monitor_name().as_deref(), Some("TestMonitor"));
+        assert_eq!(edid.serial_number().as_deref(), Some("SN123456"));
+        assert!(edid.preferred_timing().is_some());
+        assert_eq!(edid.preferred_timing().unwrap().h_active, 1920);
+
+        let all_timings = edid.all_detailed_timings();
+        assert_eq!(all_timings.len(), 2);
+        assert_eq!(all_timings[0].h_active, 1920);
+        assert_eq!(all_timings[1].h_active, 1920);
     }
 }

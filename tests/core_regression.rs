@@ -61,8 +61,8 @@ fn extension_kind_exposes_extension_metadata() {
 #[test]
 fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
     use edid_seria::{
-        CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock,
-        CtaVideoMode,
+        CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
+        CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
     };
 
     let video = CtaDataBlock {
@@ -97,14 +97,64 @@ fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
         CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Hdmi14b { .. })
     ));
 
-    let unknown = CtaDataBlock {
+    let spk = CtaDataBlock {
         tag: 4,
+        payload: vec![0xAA, 0xBB],
+    };
+    assert_eq!(
+        spk.view().unwrap(),
+        CtaDataBlockView::SpeakerAllocation(CtaSpeakerAllocation {
+            raw_mask: [0xAA, 0xBB, 0],
+        })
+    );
+    let color = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x05, 0x80, 0x01],
+    };
+    assert!(matches!(
+        color.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::Colorimetry(CtaColorimetry {
+            bt2020_rgb: true,
+            ..
+        }))
+    ));
+
+    let vcap = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x00, 0xC0],
+    };
+    assert!(matches!(
+        vcap.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::VideoCapability(
+            CtaVideoCapability {
+                selectable_quantization_range_rgb: true,
+                selectable_quantization_range_ycc: true,
+                ..
+            }
+        ))
+    ));
+
+    let freesync = CtaDataBlock {
+        tag: 3,
+        payload: vec![0x1A, 0x00, 0x00, 0x01, 48, 144, 0x01],
+    };
+    assert!(matches!(
+        freesync.view().unwrap(),
+        CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::AmdFreeSync {
+            min_refresh_hz: Some(48),
+            max_refresh_hz: Some(144),
+            ..
+        })
+    ));
+
+    let unknown = CtaDataBlock {
+        tag: 5,
         payload: vec![0xAA, 0xBB],
     };
     assert_eq!(
         unknown.view().unwrap(),
         CtaDataBlockView::Unknown {
-            tag: 4,
+            tag: 5,
             payload: vec![0xAA, 0xBB],
         }
     );
