@@ -97,3 +97,59 @@ fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
         }
     );
 }
+
+#[test]
+fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
+    use edid_seria::{
+        CtaDataBlockView, DisplayIdDataBlockView, DisplayIdHeader, EdidBlock, ExtensionError,
+    };
+
+    let mut block = EdidBlock::new_default();
+    block.raw[0] = 0x70;
+    block.raw[1] = 0x20;
+    block.raw[4] = 0;
+    block.raw[2] = 10;
+    block.raw[3] = 2;
+    block.raw[5..10].copy_from_slice(&[0x20, 1, 2, 0xAA, 0xBB]);
+    block.raw[10..15].copy_from_slice(&[0x81, 1, 2, 0x41, 16]);
+    block.raw[15] = block.raw[1..15]
+        .iter()
+        .fold(0u8, |sum, &byte| sum.wrapping_sub(byte));
+    block.update_checksum();
+
+    assert_eq!(
+        block.display_id_header().unwrap(),
+        DisplayIdHeader {
+            revision: 0x20,
+            payload_length: 10,
+            product_type_or_primary_use: 2,
+            extension_count: 0,
+        }
+    );
+    let data_blocks = block.display_id_data_blocks().unwrap();
+    assert!(matches!(
+        data_blocks[0].view().unwrap(),
+        DisplayIdDataBlockView::ProductIdentification { raw }
+            if raw == vec![0xAA, 0xBB]
+    ));
+    assert!(matches!(
+        data_blocks[1].view().unwrap(),
+        DisplayIdDataBlockView::Cta { data_blocks, .. }
+            if data_blocks == vec![edid_seria::CtaDataBlock {
+                tag: 2,
+                payload: vec![16],
+            }]
+    ));
+
+    let cta_view = data_blocks[1].view().unwrap();
+    assert!(matches!(
+        cta_view,
+        DisplayIdDataBlockView::Cta { data_blocks, .. }
+            if matches!(data_blocks[0].view(), Ok(CtaDataBlockView::Video { .. }))
+    ));
+    block.raw[15] ^= 1;
+    assert!(matches!(
+        block.display_id_header(),
+        Err(ExtensionError::InvalidDisplayIdChecksum { .. })
+    ));
+}

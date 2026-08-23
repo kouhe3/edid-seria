@@ -25,9 +25,10 @@ CRU-style display override tools.
    monitor descriptors, with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
- - **Extension views** — typed read-only CTA video/audio/HDR Static Metadata and
-   Adaptive-Sync data-block views, plus raw unknown CTA/DisplayID extension
-   preservation. Extension generation/reordering remains out of scope.
+- **Extension views** — typed read-only CTA video/audio/HDR Static Metadata and
+  Adaptive-Sync data-block views, DisplayID headers, Product Identification,
+  Display Parameters, Type I/Type VII Detailed Timing, embedded CTA, and raw
+  unknown-block views. Extension generation/reordering remains out of scope.
 - **`#![deny(unsafe_code)]`**, no panics on arbitrary EDID input, MSRV 1.95.
 
 ## Quick start
@@ -91,10 +92,7 @@ The optional fuzz target is under `fuzz/` and can be run with
 
 | Module | Responsibility |
 |--------|----------------|
-| [`timing`](src/timing.rs) | `DetailedTiming` model, preset tables, CVT computation, DTD field-limit checks |
-| [`edid`](src/edid.rs) | DTD bit-packing, slot classification, validated EDID blocks, checksums, flagged DTD access |
-| [`metadata`](src/metadata.rs) | Base-block metadata, chromaticity, established/standard timings, and monitor descriptor decoding/encoding |
-| [`extensions`](src/extensions.rs) | CTA-861 data-block views and extension-kind detection |
+| [`extensions`](src/extensions.rs) | CTA-861 data-block views, DisplayID section/block parsing and typed views, and extension-kind detection |
 | [`serialize`](src/serialize.rs) | Resolution/manual timing → EDID pipeline with strict and compatibility APIs |
 | [`error`](src/error.rs) | Structured parsing, DTD, metadata, descriptor, and serialization errors |
 
