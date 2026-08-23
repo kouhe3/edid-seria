@@ -75,6 +75,179 @@ impl DetailedTiming {
                 && (preset.v_rate - refresh).abs() < 0.5
         })
     }
+
+    /// Total horizontal pixels (active + blanking + 2×border).
+    #[must_use]
+    pub fn h_total(&self) -> u32 {
+        self.h_active + self.h_front + self.h_sync + self.h_back + 2 * self.h_border
+    }
+
+    /// Total vertical lines (active + blanking + 2×border).
+    #[must_use]
+    pub fn v_total(&self) -> u32 {
+        self.v_active + self.v_front + self.v_sync + self.v_back + 2 * self.v_border
+    }
+
+    /// Format this timing as an X11 / xrandr Modeline string.
+    ///
+    /// If `name` is `None`, a default label like `"1920x1080_60.00"` is generated.
+    #[must_use]
+    pub fn to_modeline(&self, name: Option<&str>) -> String {
+        let label = name
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| format!("{}x{}_{:.2}", self.h_active, self.v_active, self.v_rate));
+        let dot_clock = self.pixel_clock_khz as f64 / 1000.0;
+        let dot_clock_str = if self.pixel_clock_khz.is_multiple_of(10) {
+            format!("{dot_clock:.2}")
+        } else {
+            format!("{dot_clock:.3}")
+        };
+        let h_sync_start = self.h_active + self.h_front;
+        let h_sync_end = h_sync_start + self.h_sync;
+        let h_total = self.h_total();
+        let v_sync_start = self.v_active + self.v_front;
+        let v_sync_end = v_sync_start + self.v_sync;
+        let v_total = self.v_total();
+        let h_pol_str = if self.h_pol { "+hsync" } else { "-hsync" };
+        let v_pol_str = if self.v_pol { "+vsync" } else { "-vsync" };
+
+        format!(
+            "Modeline \"{label}\" {dot_clock_str} {} {h_sync_start} {h_sync_end} {h_total} {} {v_sync_start} {v_sync_end} {v_total} {h_pol_str} {v_pol_str}",
+            self.h_active, self.v_active
+        )
+    }
+
+    /// Parse an X11 / xrandr Modeline string into a DetailedTiming.
+    pub fn from_modeline(s: &str) -> Result<Self, crate::error::ModelineError> {
+        use crate::error::ModelineError;
+
+        let tokens: Vec<&str> = s.split_whitespace().collect();
+        if tokens.is_empty() {
+            return Err(ModelineError::InsufficientTokens);
+        }
+
+        let mut idx = 0;
+        if tokens[idx].eq_ignore_ascii_case("modeline") {
+            idx += 1;
+        }
+        if idx >= tokens.len() {
+            return Err(ModelineError::InsufficientTokens);
+        }
+
+        // Skip mode name (may be quoted with spaces, quoted without spaces, or unquoted text)
+        if tokens[idx].starts_with('"') {
+            while idx < tokens.len() {
+                let token = tokens[idx];
+                idx += 1;
+                if (token.len() > 1 && token.ends_with('"')) || (token == "\"" && idx > 1) {
+                    break;
+                }
+            }
+        } else if tokens[idx].parse::<f64>().is_err() {
+            idx += 1;
+        }
+
+        if tokens.len() - idx < 9 {
+            return Err(ModelineError::InsufficientTokens);
+        }
+
+        let parse_f64 = |token: &str| -> Result<f64, ModelineError> {
+            token
+                .parse::<f64>()
+                .map_err(|_| ModelineError::InvalidNumber {
+                    token: token.to_owned(),
+                })
+        };
+        let parse_u32 = |token: &str| -> Result<u32, ModelineError> {
+            token
+                .parse::<u32>()
+                .map_err(|_| ModelineError::InvalidNumber {
+                    token: token.to_owned(),
+                })
+        };
+
+        let dot_clock_mhz = parse_f64(tokens[idx])?;
+        if dot_clock_mhz <= 0.0 {
+            return Err(ModelineError::InvalidPixelClock);
+        }
+        let h_active = parse_u32(tokens[idx + 1])?;
+        let h_sync_start = parse_u32(tokens[idx + 2])?;
+        let h_sync_end = parse_u32(tokens[idx + 3])?;
+        let h_total = parse_u32(tokens[idx + 4])?;
+        let v_active = parse_u32(tokens[idx + 5])?;
+        let v_sync_start = parse_u32(tokens[idx + 6])?;
+        let v_sync_end = parse_u32(tokens[idx + 7])?;
+        let v_total = parse_u32(tokens[idx + 8])?;
+
+        if h_active == 0 || v_active == 0 {
+            return Err(ModelineError::InvalidGeometry(
+                "active area must be non-zero",
+            ));
+        }
+        if h_sync_start < h_active {
+            return Err(ModelineError::InvalidGeometry("hsync start < hactive"));
+        }
+        if h_sync_end < h_sync_start {
+            return Err(ModelineError::InvalidGeometry("hsync end < hsync start"));
+        }
+        if h_total < h_sync_end {
+            return Err(ModelineError::InvalidGeometry("htotal < hsync end"));
+        }
+        if v_sync_start < v_active {
+            return Err(ModelineError::InvalidGeometry("vsync start < vactive"));
+        }
+        if v_sync_end < v_sync_start {
+            return Err(ModelineError::InvalidGeometry("vsync end < vsync start"));
+        }
+        if v_total < v_sync_end {
+            return Err(ModelineError::InvalidGeometry("vtotal < vsync end"));
+        }
+        if h_total == 0 || v_total == 0 {
+            return Err(ModelineError::InvalidGeometry(
+                "total area must be non-zero",
+            ));
+        }
+        let pixel_clock_khz = (dot_clock_mhz * 1000.0).round() as u32;
+        let h_front = h_sync_start - h_active;
+        let h_sync = h_sync_end - h_sync_start;
+        let h_back = h_total - h_sync_end;
+        let v_front = v_sync_start - v_active;
+        let v_sync = v_sync_end - v_sync_start;
+        let v_back = v_total - v_sync_end;
+
+        let mut h_pol = false;
+        let mut v_pol = false;
+        for &flag in &tokens[idx + 9..] {
+            if flag.eq_ignore_ascii_case("+hsync") {
+                h_pol = true;
+            } else if flag.eq_ignore_ascii_case("-hsync") {
+                h_pol = false;
+            } else if flag.eq_ignore_ascii_case("+vsync") {
+                v_pol = true;
+            } else if flag.eq_ignore_ascii_case("-vsync") {
+                v_pol = false;
+            }
+        }
+
+        let v_rate = (pixel_clock_khz as f64 * 1000.0) / (h_total as f64 * v_total as f64);
+
+        Ok(DetailedTiming {
+            h_active,
+            v_active,
+            h_front,
+            h_sync,
+            h_back,
+            v_front,
+            v_sync,
+            v_back,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz,
+            h_pol,
+            v_pol,
+            v_rate,
+        })
+    }
 }
 
 /// EDID DTD field limits (E-EDID 1.4 §3.10.2).
@@ -1276,5 +1449,90 @@ mod tests {
 
         let hdtv_576p = DetailedTiming::compute_hdtv_blanking(720, 576, 50.0).unwrap();
         assert_eq!(hdtv_576p.pixel_clock_khz, 27000);
+    }
+
+    #[test]
+    fn modeline_roundtrip_formatting_and_parsing() {
+        let original = DetailedTiming {
+            h_active: 1920,
+            v_active: 1080,
+            h_front: 88,
+            h_sync: 44,
+            h_back: 148,
+            v_front: 4,
+            v_sync: 5,
+            v_back: 36,
+            h_border: 0,
+            v_border: 0,
+            pixel_clock_khz: 148500,
+            h_pol: true,
+            v_pol: true,
+            v_rate: 60.0,
+        };
+
+        let modeline_str = original.to_modeline(Some("1920x1080_60.00"));
+        assert_eq!(
+            modeline_str,
+            "Modeline \"1920x1080_60.00\" 148.50 1920 2008 2052 2200 1080 1084 1089 1125 +hsync +vsync"
+        );
+
+        let parsed = DetailedTiming::from_modeline(&modeline_str).unwrap();
+        assert_eq!(parsed.h_active, original.h_active);
+        assert_eq!(parsed.v_active, original.v_active);
+        assert_eq!(parsed.h_front, original.h_front);
+        assert_eq!(parsed.h_sync, original.h_sync);
+        assert_eq!(parsed.h_back, original.h_back);
+        assert_eq!(parsed.v_front, original.v_front);
+        assert_eq!(parsed.v_sync, original.v_sync);
+        assert_eq!(parsed.v_back, original.v_back);
+        assert_eq!(parsed.pixel_clock_khz, original.pixel_clock_khz);
+        assert_eq!(parsed.h_pol, original.h_pol);
+        assert_eq!(parsed.v_pol, original.v_pol);
+        assert!((parsed.v_rate - original.v_rate).abs() < 0.01);
+
+        // Parsing without Modeline prefix or name
+        let raw_line = "148.50 1920 2008 2052 2200 1080 1084 1089 1125 +hsync -vsync";
+        let parsed_raw = DetailedTiming::from_modeline(raw_line).unwrap();
+        assert_eq!(parsed_raw.h_active, 1920);
+        assert!(parsed_raw.h_pol);
+        assert!(!parsed_raw.v_pol);
+
+        // Mode name with spaces in quotes
+        let spaced_name = "Modeline \"1920x1080 @ 60Hz\" 148.50 1920 2008 2052 2200 1080 1084 1089 1125 +hsync +vsync";
+        let parsed_spaced = DetailedTiming::from_modeline(spaced_name).unwrap();
+        assert_eq!(parsed_spaced.h_active, 1920);
+        assert_eq!(parsed_spaced.pixel_clock_khz, 148500);
+
+        // kHz dot-clock precision preservation (3 decimal places)
+        let mut precise = original.clone();
+        precise.pixel_clock_khz = 74176;
+        let precise_modeline = precise.to_modeline(Some("720p59.94"));
+        assert!(precise_modeline.contains(" 74.176 "));
+        let parsed_precise = DetailedTiming::from_modeline(&precise_modeline).unwrap();
+        assert_eq!(parsed_precise.pixel_clock_khz, 74176);
+    }
+
+    #[test]
+    fn modeline_parsing_rejects_invalid_geometry() {
+        use crate::error::ModelineError;
+
+        let bad_geom =
+            "Modeline \"bad\" 148.50 1920 1900 2052 2200 1080 1084 1089 1125 +hsync +vsync";
+        assert!(matches!(
+            DetailedTiming::from_modeline(bad_geom),
+            Err(ModelineError::InvalidGeometry(_))
+        ));
+
+        let zero_area = "Modeline \"zero\" 148.50 0 0 0 0 1080 1084 1089 1125 +hsync +vsync";
+        assert!(matches!(
+            DetailedTiming::from_modeline(zero_area),
+            Err(ModelineError::InvalidGeometry(_))
+        ));
+
+        let insufficient = "Modeline \"bad\" 148.50 1920";
+        assert!(matches!(
+            DetailedTiming::from_modeline(insufficient),
+            Err(ModelineError::InsufficientTokens)
+        ));
     }
 }

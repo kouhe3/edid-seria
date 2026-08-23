@@ -17,18 +17,19 @@ pub mod serialize;
 pub mod timing;
 pub use edid::{DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock};
 pub use error::{
-    DescriptorError, DtdError, DtdField, EdidError, MetadataError, MetadataWriteError,
-    SerializeError,
+    DescriptorError, DtdError, DtdField, EdidError, HexError, MetadataError, MetadataWriteError,
+    ModelineError, SerializeError,
 };
 pub use extensions::{
-    CtaAudioDescriptor, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVideoMode,
-    DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
-    DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
+    CtaAudioDescriptor, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
+    CtaVendorSpecificBlock, CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView,
+    DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError,
+    ExtensionKind,
 };
 pub use metadata::{
-    BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, EstablishedTiming,
-    EstablishedTimings, MonitorDescriptor, StandardTiming, StandardTimingAspectRatio,
-    StandardTimingEntry,
+    AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,
+    EstablishedTiming, EstablishedTimings, MonitorDescriptor, StandardTiming,
+    StandardTimingAspectRatio, StandardTimingEntry,
 };
 pub use serialize::{
     ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions,

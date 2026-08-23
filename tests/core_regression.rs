@@ -60,7 +60,10 @@ fn extension_kind_exposes_extension_metadata() {
 
 #[test]
 fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
-    use edid_seria::{CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVideoMode};
+    use edid_seria::{
+        CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock,
+        CtaVideoMode,
+    };
 
     let video = CtaDataBlock {
         tag: 2,
@@ -85,14 +88,23 @@ fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
         CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata { .. })
     ));
 
-    let unknown = CtaDataBlock {
+    let vsdb = CtaDataBlock {
         tag: 3,
+        payload: vec![0x03, 0x0C, 0x00, 0x10, 0x00],
+    };
+    assert!(matches!(
+        vsdb.view().unwrap(),
+        CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Hdmi14b { .. })
+    ));
+
+    let unknown = CtaDataBlock {
+        tag: 4,
         payload: vec![0xAA, 0xBB],
     };
     assert_eq!(
         unknown.view().unwrap(),
         CtaDataBlockView::Unknown {
-            tag: 3,
+            tag: 4,
             payload: vec![0xAA, 0xBB],
         }
     );

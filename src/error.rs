@@ -171,6 +171,18 @@ pub enum DescriptorError {
     NonAsciiText,
     /// A range-limit field is outside its one-byte EDID representation.
     RangeOutOfBounds,
+    /// Chromaticity coordinate exceeds 10-bit range (0..=1023).
+    InvalidChromaticityCoordinate {
+        /// Coordinate value.
+        value: u16,
+    },
+    /// Gamma is outside the EDID representable range, in hundredths.
+    InvalidGamma {
+        /// Supplied gamma multiplied by 100.
+        value: u16,
+    },
+    /// Standard timing error in descriptor 0xFA.
+    StandardTimingError(MetadataWriteError),
 }
 impl fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -188,6 +200,19 @@ impl fmt::Display for DescriptorError {
             }
             Self::NonAsciiText => f.write_str("descriptor text must be ASCII"),
             Self::RangeOutOfBounds => f.write_str("descriptor range field is out of bounds"),
+            Self::InvalidChromaticityCoordinate { value } => {
+                write!(
+                    f,
+                    "descriptor chromaticity coordinate {value} exceeds 10 bits"
+                )
+            }
+            Self::InvalidGamma { value } => {
+                write!(
+                    f,
+                    "descriptor gamma value {value} is outside the EDID range"
+                )
+            }
+            Self::StandardTimingError(err) => write!(f, "descriptor standard timing error: {err}"),
         }
     }
 }
@@ -406,3 +431,89 @@ impl fmt::Display for EdidError {
 }
 
 impl std::error::Error for EdidError {}
+
+/// Errors returned while parsing an X11 / xrandr Modeline string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelineError {
+    /// Modeline string is empty or contains insufficient tokens.
+    InsufficientTokens,
+    /// A numeric parameter failed to parse.
+    InvalidNumber {
+        /// The invalid token.
+        token: String,
+    },
+    /// Invalid geometry (e.g. sync start < active, sync end < sync start, total < sync end).
+    InvalidGeometry(&'static str),
+    /// Pixel clock is zero or mathematically invalid.
+    InvalidPixelClock,
+}
+
+impl fmt::Display for ModelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InsufficientTokens => f.write_str("Modeline string has insufficient tokens"),
+            Self::InvalidNumber { token } => {
+                write!(f, "invalid numeric token in Modeline: {token:?}")
+            }
+            Self::InvalidGeometry(reason) => write!(f, "invalid Modeline geometry: {reason}"),
+            Self::InvalidPixelClock => {
+                f.write_str("Modeline pixel clock must be positive and non-zero")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ModelineError {}
+
+/// Errors returned while parsing hexadecimal EDID strings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HexError {
+    /// String contains a non-hexadecimal character.
+    InvalidHexCharacter {
+        /// Character byte offset.
+        offset: usize,
+        /// Invalid character.
+        character: char,
+    },
+    /// Hex string has an odd number of hexadecimal digits.
+    OddLength {
+        /// Total number of hex digits found.
+        length: usize,
+    },
+    /// Decoded byte count is not a multiple of EDID_BLOCK_SIZE (128 bytes).
+    InvalidLength {
+        /// Number of decoded bytes.
+        bytes: usize,
+    },
+    /// EDID block or sequence validation failed.
+    EdidError(EdidError),
+}
+
+impl fmt::Display for HexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidHexCharacter { offset, character } => {
+                write!(f, "invalid hex character {character:?} at index {offset}")
+            }
+            Self::OddLength { length } => {
+                write!(f, "hex string has odd length ({length} nibbles)")
+            }
+            Self::InvalidLength { bytes } => {
+                write!(
+                    f,
+                    "decoded {bytes} bytes, expected a multiple of 128 (EDID block size)"
+                )
+            }
+            Self::EdidError(err) => write!(f, "EDID validation error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for HexError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EdidError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
