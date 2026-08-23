@@ -82,6 +82,44 @@ pub struct CtaVideoMode {
     pub native: bool,
 }
 
+/// A CTA Vendor-Specific Data Block (Tag 3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CtaVendorSpecificBlock {
+    /// HDMI 1.4b VSDB (IEEE OUI 0x000C03).
+    Hdmi14b {
+        /// Source Physical Address (CEC A.B.C.D).
+        physical_address: [u8; 2],
+        /// Maximum TMDS clock in MHz, if specified.
+        max_tmds_clock_mhz: Option<u16>,
+        /// Deep Color support flags (byte 5).
+        deep_color_flags: u8,
+        /// Latency and video feature flags (byte 7).
+        feature_flags: u8,
+        /// Original payload including the 3-byte OUI.
+        raw: Vec<u8>,
+    },
+    /// HDMI Forum (HDMI 2.0+) VSDB (IEEE OUI 0xC45DD8).
+    HdmiForum {
+        /// HF-VSDB version (usually 1).
+        version: u8,
+        /// Maximum TMDS character rate in MHz, if specified (5 MHz units).
+        max_tmds_character_rate_mhz: Option<u16>,
+        /// SCDC and scrambling capability flags (byte 5).
+        scdc_flags: u8,
+        /// Deep Color 4:2:0 support flags (byte 7).
+        deep_color_420_flags: u8,
+        /// Original payload including the 3-byte OUI.
+        raw: Vec<u8>,
+    },
+    /// Any other Vendor-Specific Data Block (Dolby Vision, FreeSync, HDR10+, etc.).
+    Other {
+        /// 24-bit IEEE Organizationally Unique Identifier in Little-Endian byte order.
+        oui: [u8; 3],
+        /// Payload bytes after the 3-byte OUI.
+        payload: Vec<u8>,
+    },
+}
+
 /// Typed read-only views for CTA data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CtaDataBlockView {
@@ -95,6 +133,8 @@ pub enum CtaDataBlockView {
         /// Audio descriptors in source order.
         descriptors: Vec<CtaAudioDescriptor>,
     },
+    /// Vendor-Specific Data Block (Tag 3).
+    VendorSpecific(CtaVendorSpecificBlock),
     /// Extended CTA data block.
     Extended(CtaExtendedDataBlockView),
     /// Any CTA tag not modeled by this version.
@@ -300,6 +340,7 @@ impl CtaDataBlock {
                 }
                 Ok(CtaDataBlockView::Video { modes })
             }
+            3 => self.vendor_specific_view(),
             7 => self.extended_view(),
             tag => Ok(CtaDataBlockView::Unknown {
                 tag,
@@ -345,6 +386,69 @@ impl CtaDataBlock {
                 CtaExtendedDataBlockView::Unknown {
                     extended_tag,
                     payload: self.payload[1..].to_vec(),
+                },
+            )),
+        }
+    }
+
+    fn vendor_specific_view(&self) -> Result<CtaDataBlockView, ExtensionError> {
+        if self.payload.len() < 3 {
+            return Err(ExtensionError::TruncatedVendorSpecificDataBlock {
+                length: self.payload.len(),
+            });
+        }
+        let oui = [self.payload[0], self.payload[1], self.payload[2]];
+        match oui {
+            // HDMI 1.4b OUI: 0x000C03 (Little-Endian: 0x03, 0x0C, 0x00)
+            [0x03, 0x0C, 0x00] => {
+                let physical_address = if self.payload.len() >= 5 {
+                    [self.payload[3], self.payload[4]]
+                } else {
+                    [0, 0]
+                };
+                let deep_color_flags = self.payload.get(5).copied().unwrap_or(0);
+                let max_tmds_clock_mhz = self
+                    .payload
+                    .get(6)
+                    .copied()
+                    .filter(|&b| b != 0)
+                    .map(|b| b as u16 * 5);
+                let feature_flags = self.payload.get(7).copied().unwrap_or(0);
+                Ok(CtaDataBlockView::VendorSpecific(
+                    CtaVendorSpecificBlock::Hdmi14b {
+                        physical_address,
+                        max_tmds_clock_mhz,
+                        deep_color_flags,
+                        feature_flags,
+                        raw: self.payload.clone(),
+                    },
+                ))
+            }
+            // HDMI Forum OUI: 0xC45DD8 (Little-Endian: 0xD8, 0x5D, 0xC4)
+            [0xD8, 0x5D, 0xC4] => {
+                let version = self.payload.get(3).copied().unwrap_or(1);
+                let max_tmds_character_rate_mhz = self
+                    .payload
+                    .get(4)
+                    .copied()
+                    .filter(|&b| b != 0)
+                    .map(|b| b as u16 * 5);
+                let scdc_flags = self.payload.get(5).copied().unwrap_or(0);
+                let deep_color_420_flags = self.payload.get(7).copied().unwrap_or(0);
+                Ok(CtaDataBlockView::VendorSpecific(
+                    CtaVendorSpecificBlock::HdmiForum {
+                        version,
+                        max_tmds_character_rate_mhz,
+                        scdc_flags,
+                        deep_color_420_flags,
+                        raw: self.payload.clone(),
+                    },
+                ))
+            }
+            _ => Ok(CtaDataBlockView::VendorSpecific(
+                CtaVendorSpecificBlock::Other {
+                    oui,
+                    payload: self.payload[3..].to_vec(),
                 },
             )),
         }
@@ -531,6 +635,11 @@ pub enum ExtensionError {
         /// Minimum payload length including the extended tag.
         minimum: usize,
     },
+    /// CTA vendor-specific data block payload is shorter than 3-byte OUI.
+    TruncatedVendorSpecificDataBlock {
+        /// Actual payload length.
+        length: usize,
+    },
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -599,6 +708,10 @@ impl std::fmt::Display for ExtensionError {
             } => write!(
                 f,
                 "CTA extended data block tag 0x{extended_tag:02X} has length {length}, minimum is {minimum}"
+            ),
+            Self::TruncatedVendorSpecificDataBlock { length } => write!(
+                f,
+                "CTA vendor-specific data block has payload length {length}, minimum is 3 (OUI)"
             ),
         }
     }
@@ -1133,6 +1246,81 @@ mod tests {
         assert!(matches!(
             block.display_id_header(),
             Err(ExtensionError::InvalidDisplayIdChecksum { .. })
+        ));
+    }
+
+    #[test]
+    fn cta_vendor_specific_data_blocks_decode_correctly() {
+        use super::CtaVendorSpecificBlock;
+
+        // HDMI 1.4b VSDB
+        let hdmi14b_payload = vec![0x03, 0x0C, 0x00, 0x10, 0x00, 0x38, 0x3C, 0x20];
+        let block = CtaDataBlock {
+            tag: 3,
+            payload: hdmi14b_payload.clone(),
+        };
+        match block.view().unwrap() {
+            CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Hdmi14b {
+                physical_address,
+                max_tmds_clock_mhz,
+                deep_color_flags,
+                feature_flags,
+                raw,
+            }) => {
+                assert_eq!(physical_address, [0x10, 0x00]);
+                assert_eq!(max_tmds_clock_mhz, Some(300)); // 0x3C * 5 = 60 * 5 = 300
+                assert_eq!(deep_color_flags, 0x38);
+                assert_eq!(feature_flags, 0x20);
+                assert_eq!(raw, hdmi14b_payload);
+            }
+            other => panic!("expected Hdmi14b, got {other:?}"),
+        }
+
+        // HDMI Forum VSDB
+        let hf_payload = vec![0xD8, 0x5D, 0xC4, 0x01, 0x78, 0xDC, 0x00, 0x01];
+        let block = CtaDataBlock {
+            tag: 3,
+            payload: hf_payload.clone(),
+        };
+        match block.view().unwrap() {
+            CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::HdmiForum {
+                version,
+                max_tmds_character_rate_mhz,
+                scdc_flags,
+                deep_color_420_flags,
+                raw,
+            }) => {
+                assert_eq!(version, 1);
+                assert_eq!(max_tmds_character_rate_mhz, Some(600)); // 0x78 * 5 = 120 * 5 = 600
+                assert_eq!(scdc_flags, 0xDC);
+                assert_eq!(deep_color_420_flags, 0x01);
+                assert_eq!(raw, hf_payload);
+            }
+            other => panic!("expected HdmiForum, got {other:?}"),
+        }
+
+        // Other VSDB (e.g., Dolby Vision: 0x00D046 -> [0x46, 0xD0, 0x00])
+        let dv_payload = vec![0x46, 0xD0, 0x00, 0x11, 0x22, 0x33];
+        let block = CtaDataBlock {
+            tag: 3,
+            payload: dv_payload.clone(),
+        };
+        match block.view().unwrap() {
+            CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Other { oui, payload }) => {
+                assert_eq!(oui, [0x46, 0xD0, 0x00]);
+                assert_eq!(payload, vec![0x11, 0x22, 0x33]);
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+
+        // Truncated VSDB (< 3 bytes)
+        let truncated = CtaDataBlock {
+            tag: 3,
+            payload: vec![0x03, 0x0C],
+        };
+        assert!(matches!(
+            truncated.view(),
+            Err(ExtensionError::TruncatedVendorSpecificDataBlock { length: 2 })
         ));
     }
 }

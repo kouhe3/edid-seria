@@ -21,9 +21,10 @@ pub use error::{
     SerializeError,
 };
 pub use extensions::{
-    CtaAudioDescriptor, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVideoMode,
-    DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
-    DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
+    CtaAudioDescriptor, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
+    CtaVendorSpecificBlock, CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView,
+    DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError,
+    ExtensionKind,
 };
 pub use metadata::{
     BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, EstablishedTiming,
