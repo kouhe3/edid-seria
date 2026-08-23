@@ -679,8 +679,8 @@ impl EdidBlock {
             0xFC => MonitorDescriptor::ProductName(decode_text(&payload)?),
             0xFE => MonitorDescriptor::AlphanumericString(decode_text(&payload)?),
             0xFB => {
-                let point1 = decode_color_point(&payload[0..5])
-                    .ok_or(DescriptorError::RangeOutOfBounds)?;
+                let point1 =
+                    decode_color_point(&payload[0..5]).ok_or(DescriptorError::RangeOutOfBounds)?;
                 let point2 = decode_color_point(&payload[5..10]);
                 MonitorDescriptor::AdditionalColorPoint { point1, point2 }
             }
@@ -787,14 +787,10 @@ fn decode_color_point(data: &[u8]) -> Option<AdditionalColorPoint> {
 
 fn encode_color_point(cp: &AdditionalColorPoint, target: &mut [u8]) -> Result<(), DescriptorError> {
     if cp.point.x > 1023 {
-        return Err(DescriptorError::InvalidChromaticityCoordinate {
-            value: cp.point.x,
-        });
+        return Err(DescriptorError::InvalidChromaticityCoordinate { value: cp.point.x });
     }
     if cp.point.y > 1023 {
-        return Err(DescriptorError::InvalidChromaticityCoordinate {
-            value: cp.point.y,
-        });
+        return Err(DescriptorError::InvalidChromaticityCoordinate { value: cp.point.y });
     }
     if let Some(gamma) = cp.gamma
         && !(101..=355).contains(&gamma)

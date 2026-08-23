@@ -17,8 +17,8 @@ pub mod serialize;
 pub mod timing;
 pub use edid::{DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock};
 pub use error::{
-    DescriptorError, DtdError, DtdField, EdidError, MetadataError, MetadataWriteError,
-    SerializeError,
+    DescriptorError, DtdError, DtdField, EdidError, HexError, MetadataError, MetadataWriteError,
+    ModelineError, SerializeError,
 };
 pub use extensions::{
     CtaAudioDescriptor, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,

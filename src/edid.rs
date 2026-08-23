@@ -472,6 +472,47 @@ impl EdidBlock {
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
     }
+
+    /// Format this 128-byte block as a lowercase continuous hex string (256 hex chars).
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        let mut s = String::with_capacity(EDID_BLOCK_SIZE * 2);
+        for &b in &self.raw {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    /// Format this block as 8 lines of 16 uppercase space-separated hex bytes.
+    #[must_use]
+    pub fn to_hex_formatted(&self) -> String {
+        let mut s = String::with_capacity(EDID_BLOCK_SIZE * 3 + 8);
+        for (i, &b) in self.raw.iter().enumerate() {
+            if i > 0 {
+                if i % 16 == 0 {
+                    s.push('\n');
+                } else {
+                    s.push(' ');
+                }
+            }
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02X}");
+        }
+        s
+    }
+
+    /// Parse a single 128-byte EDID block from a hex string.
+    ///
+    /// Accepts continuous hex, space-separated hex, and C-array hex (`0x00, 0xFF`),
+    /// ignoring whitespace, commas, semicolons, brackets, and `0x`/`0X` prefixes.
+    pub fn from_hex(s: &str) -> Result<Self, crate::error::HexError> {
+        let bytes = parse_hex_bytes(s)?;
+        if bytes.len() != EDID_BLOCK_SIZE {
+            return Err(crate::error::HexError::InvalidLength { bytes: bytes.len() });
+        }
+        Self::from_bytes_checked(&bytes).map_err(crate::error::HexError::EdidError)
+    }
 }
 
 /// A complete EDID made of one validated base block and its extensions.
@@ -532,6 +573,99 @@ impl Edid {
         }
         Ok(())
     }
+
+    /// Format the complete EDID sequence (base + extensions) as continuous hex.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        let count = 1 + self.extensions.len();
+        let mut s = String::with_capacity(count * EDID_BLOCK_SIZE * 2);
+        s.push_str(&self.base.to_hex());
+        for ext in &self.extensions {
+            s.push_str(&ext.to_hex());
+        }
+        s
+    }
+
+    /// Format the complete EDID sequence as formatted 16-byte lines separated by empty lines.
+    #[must_use]
+    pub fn to_hex_formatted(&self) -> String {
+        let count = 1 + self.extensions.len();
+        let mut blocks = Vec::with_capacity(count);
+        blocks.push(self.base.to_hex_formatted());
+        for ext in &self.extensions {
+            blocks.push(ext.to_hex_formatted());
+        }
+        blocks.join("\n\n")
+    }
+
+    /// Parse a complete EDID from a hex string (validates all blocks and sequence).
+    pub fn from_hex(s: &str) -> Result<Self, crate::error::HexError> {
+        let bytes = parse_hex_bytes(s)?;
+        Self::from_bytes(&bytes).map_err(crate::error::HexError::EdidError)
+    }
+}
+
+pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, crate::error::HexError> {
+    use crate::error::HexError;
+
+    let mut bytes = Vec::new();
+    let mut chars = s.char_indices().peekable();
+    let mut current_nibble: Option<u8> = None;
+
+    while let Some(&(idx, ch)) = chars.peek() {
+        if ch.is_ascii_whitespace()
+            || ch == ','
+            || ch == ';'
+            || ch == '{'
+            || ch == '}'
+            || ch == '['
+            || ch == ']'
+        {
+            chars.next();
+            continue;
+        }
+        if ch == '0' {
+            let mut clone = chars.clone();
+            clone.next();
+            if let Some(&(_, next_ch)) = clone.peek()
+                && (next_ch == 'x' || next_ch == 'X')
+            {
+                chars.next();
+                chars.next();
+                continue;
+            }
+        }
+        chars.next();
+        let digit = match ch {
+            '0'..='9' => ch as u8 - b'0',
+            'a'..='f' => ch as u8 - b'a' + 10,
+            'A'..='F' => ch as u8 - b'A' + 10,
+            _ => {
+                return Err(HexError::InvalidHexCharacter {
+                    offset: idx,
+                    character: ch,
+                });
+            }
+        };
+
+        match current_nibble {
+            None => {
+                current_nibble = Some(digit);
+            }
+            Some(high) => {
+                bytes.push((high << 4) | digit);
+                current_nibble = None;
+            }
+        }
+    }
+
+    if current_nibble.is_some() {
+        return Err(HexError::OddLength {
+            length: bytes.len() * 2 + 1,
+        });
+    }
+
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -956,5 +1090,58 @@ mod tests {
     fn default_block_is_digital() {
         let block = EdidBlock::new_default();
         assert_ne!(block.raw[20] & 0x80, 0);
+    }
+
+    #[test]
+    fn hex_roundtrip_formatting_and_parsing() {
+        let block = EdidBlock::new_default();
+        let hex_compact = block.to_hex();
+        assert_eq!(hex_compact.len(), 256);
+
+        let parsed_compact = EdidBlock::from_hex(&hex_compact).unwrap();
+        assert_eq!(parsed_compact, block);
+
+        let hex_formatted = block.to_hex_formatted();
+        let parsed_formatted = EdidBlock::from_hex(&hex_formatted).unwrap();
+        assert_eq!(parsed_formatted, block);
+
+        // C-array style hex parsing
+        let c_array = "0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00";
+        let parsed_chunk = parse_hex_bytes(c_array).unwrap();
+        assert_eq!(
+            parsed_chunk,
+            &[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+        );
+
+        let edid = Edid {
+            base: block.clone(),
+            extensions: Vec::new(),
+        };
+        let edid_hex = edid.to_hex();
+        let parsed_edid = Edid::from_hex(&edid_hex).unwrap();
+        assert_eq!(parsed_edid, edid);
+    }
+
+    #[test]
+    fn hex_parsing_rejects_invalid_inputs() {
+        use crate::error::HexError;
+
+        // Odd length
+        assert!(matches!(
+            EdidBlock::from_hex("00FF0"),
+            Err(HexError::OddLength { length: 5 })
+        ));
+
+        // Invalid hex character
+        assert!(matches!(
+            EdidBlock::from_hex("00FFGG"),
+            Err(HexError::InvalidHexCharacter { character: 'G', .. })
+        ));
+
+        // Invalid length (not 128 bytes)
+        assert!(matches!(
+            EdidBlock::from_hex("00FFFFFFFFFFFF00"),
+            Err(HexError::InvalidLength { bytes: 8 })
+        ));
     }
 }

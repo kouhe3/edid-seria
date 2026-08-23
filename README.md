@@ -22,13 +22,15 @@ CRU-style display override tools.
    checksum, version, extension-count, and structured error reporting.
  - **Metadata and descriptors** — typed base-block identity, chromaticity
    fixed-point coordinates, Established Timings, Standard Timings, and common
-   monitor descriptors, with unknown descriptor payload preservation.
+   monitor descriptors (name, serial, alphanumeric string, color point, additional standard timings, range limits, dummy), with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
-- **Extension views** — typed read-only CTA video/audio/HDR Static Metadata and
+- **Extension views** — typed read-only CTA video/audio/VSDB (HDMI 1.4b, HDMI Forum 2.0+)/HDR Static Metadata and
   Adaptive-Sync data-block views, DisplayID headers, Product Identification,
   Display Parameters, Type I/Type VII Detailed Timing, embedded CTA, and raw
   unknown-block views. Extension generation/reordering remains out of scope.
+- **Modeline and Hex interoperability** — X11/xrandr Modeline string formatting and
+  parsing, and flexible EDID hex string (compact, formatted, C-array) import/export.
 - **`#![deny(unsafe_code)]`**, no panics on arbitrary EDID input, MSRV 1.95.
 
 ## Quick start
