@@ -375,6 +375,17 @@ impl BaseMetadata {
     }
 }
 
+/// One white-point entry in an Additional Color Point descriptor (tag 0xFB).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AdditionalColorPoint {
+    /// White point index (1..=255).
+    pub index: u8,
+    /// 10-bit Chromaticity point.
+    pub point: ChromaticityPoint,
+    /// Gamma multiplied by 100, e.g. 220 for gamma 2.2; `None` when unspecified.
+    pub gamma: Option<u16>,
+}
+
 /// A monitor descriptor stored in one of the four base-block descriptor slots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MonitorDescriptor {
@@ -382,6 +393,17 @@ pub enum MonitorDescriptor {
     SerialNumber(String),
     /// Display product name text descriptor.
     ProductName(String),
+    /// Alphanumeric Data String text descriptor (Tag 0xFE).
+    AlphanumericString(String),
+    /// Additional White Point Data (Tag 0xFB).
+    AdditionalColorPoint {
+        /// First white point entry.
+        point1: AdditionalColorPoint,
+        /// Optional second white point entry.
+        point2: Option<AdditionalColorPoint>,
+    },
+    /// Additional Standard Timing Identifications (Tag 0xFA, 6 slots).
+    AdditionalStandardTimings([StandardTimingEntry; 6]),
     /// Vertical/horizontal range limits and maximum pixel clock.
     RangeLimits {
         /// Minimum vertical frequency in Hz.
@@ -395,6 +417,8 @@ pub enum MonitorDescriptor {
         /// Maximum pixel clock in MHz.
         max_pixel_clock_mhz: u16,
     },
+    /// Dummy descriptor (Tag 0x10, zero payload).
+    Dummy,
     /// Unknown descriptor tag and its raw 13-byte payload.
     Unknown {
         /// Descriptor tag byte.
@@ -409,6 +433,31 @@ impl MonitorDescriptor {
         match self {
             Self::SerialNumber(text) => Ok((0xFF, encode_text(text)?)),
             Self::ProductName(text) => Ok((0xFC, encode_text(text)?)),
+            Self::AlphanumericString(text) => Ok((0xFE, encode_text(text)?)),
+            Self::AdditionalColorPoint { point1, point2 } => {
+                let mut payload = [0u8; TEXT_PAYLOAD_LEN];
+                encode_color_point(point1, &mut payload[0..5])?;
+                if let Some(p2) = point2 {
+                    encode_color_point(p2, &mut payload[5..10])?;
+                }
+                payload[10] = 0x0A;
+                payload[11] = 0x20;
+                payload[12] = 0x20;
+                Ok((0xFB, payload))
+            }
+            Self::AdditionalStandardTimings(timings) => {
+                let mut payload = [0u8; TEXT_PAYLOAD_LEN];
+                for (i, timing) in timings.iter().copied().enumerate() {
+                    let off = i * 2;
+                    let bytes = timing
+                        .encode()
+                        .map_err(DescriptorError::StandardTimingError)?;
+                    payload[off..off + 2].copy_from_slice(&bytes);
+                }
+                payload[12] = 0x0A;
+                Ok((0xFA, payload))
+            }
+            Self::Dummy => Ok((0x10, [0u8; TEXT_PAYLOAD_LEN])),
             Self::RangeLimits {
                 min_vertical_hz,
                 max_vertical_hz,
@@ -618,7 +667,6 @@ impl EdidBlock {
             || descriptor[0] != 0
             || descriptor[1] != 0
             || descriptor.iter().all(|&byte| byte == 0)
-            || (descriptor[3] == 0x10 && descriptor[4..].iter().all(|&byte| byte == 0))
         {
             return Ok(None);
         }
@@ -629,6 +677,21 @@ impl EdidBlock {
         let value = match descriptor[3] {
             0xFF => MonitorDescriptor::SerialNumber(decode_text(&payload)?),
             0xFC => MonitorDescriptor::ProductName(decode_text(&payload)?),
+            0xFE => MonitorDescriptor::AlphanumericString(decode_text(&payload)?),
+            0xFB => {
+                let point1 = decode_color_point(&payload[0..5])
+                    .ok_or(DescriptorError::RangeOutOfBounds)?;
+                let point2 = decode_color_point(&payload[5..10]);
+                MonitorDescriptor::AdditionalColorPoint { point1, point2 }
+            }
+            0xFA => {
+                let mut timings = [StandardTimingEntry::Unused; 6];
+                for (i, entry) in timings.iter_mut().enumerate() {
+                    let off = i * 2;
+                    *entry = StandardTimingEntry::decode([payload[off], payload[off + 1]]);
+                }
+                MonitorDescriptor::AdditionalStandardTimings(timings)
+            }
             0xFD => MonitorDescriptor::RangeLimits {
                 min_vertical_hz: payload[0],
                 max_vertical_hz: payload[1],
@@ -636,6 +699,7 @@ impl EdidBlock {
                 max_horizontal_khz: payload[3],
                 max_pixel_clock_mhz: payload[4] as u16 * 10,
             },
+            0x10 if payload.iter().all(|&b| b == 0) => MonitorDescriptor::Dummy,
             tag => MonitorDescriptor::Unknown { tag, payload },
         };
         Ok(Some(value))
@@ -701,6 +765,50 @@ fn decode_text(payload: &[u8; TEXT_PAYLOAD_LEN]) -> Result<String, DescriptorErr
         .trim_end_matches(' ')
         .to_owned();
     Ok(text)
+}
+
+fn decode_color_point(data: &[u8]) -> Option<AdditionalColorPoint> {
+    let index = data[0];
+    if index == 0 {
+        return None;
+    }
+    let low = data[1];
+    let x_low = (low >> 2) & 0x03;
+    let y_low = low & 0x03;
+    let x = ((data[2] as u16) << 2) | (x_low as u16);
+    let y = ((data[3] as u16) << 2) | (y_low as u16);
+    let gamma = (data[4] != 0).then(|| 100 + data[4] as u16);
+    Some(AdditionalColorPoint {
+        index,
+        point: ChromaticityPoint { x, y },
+        gamma,
+    })
+}
+
+fn encode_color_point(cp: &AdditionalColorPoint, target: &mut [u8]) -> Result<(), DescriptorError> {
+    if cp.point.x > 1023 {
+        return Err(DescriptorError::InvalidChromaticityCoordinate {
+            value: cp.point.x,
+        });
+    }
+    if cp.point.y > 1023 {
+        return Err(DescriptorError::InvalidChromaticityCoordinate {
+            value: cp.point.y,
+        });
+    }
+    if let Some(gamma) = cp.gamma
+        && !(101..=355).contains(&gamma)
+    {
+        return Err(DescriptorError::InvalidGamma { value: gamma });
+    }
+    target[0] = cp.index;
+    let x_low = (cp.point.x & 0x03) as u8;
+    let y_low = (cp.point.y & 0x03) as u8;
+    target[1] = (x_low << 2) | y_low;
+    target[2] = (cp.point.x >> 2) as u8;
+    target[3] = (cp.point.y >> 2) as u8;
+    target[4] = cp.gamma.map_or(0, |g| (g - 100) as u8);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -902,5 +1010,83 @@ mod tests {
             Err(MetadataWriteError::InvalidReservedStandardTimingEncoding { raw: [0xD1, 0xC0] })
         );
         assert_eq!(block.raw, reserved_before);
+    }
+
+    #[test]
+    fn alphanumeric_string_descriptor_roundtrips() {
+        let mut block = EdidBlock::new_default();
+        let descriptor = MonitorDescriptor::AlphanumericString("DISPLAY-01".to_owned());
+        block.set_monitor_descriptor(1, &descriptor).unwrap();
+        assert_eq!(block.monitor_descriptor(1).unwrap(), Some(descriptor));
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn additional_color_point_descriptor_roundtrips() {
+        use super::AdditionalColorPoint;
+
+        let mut block = EdidBlock::new_default();
+        let descriptor = MonitorDescriptor::AdditionalColorPoint {
+            point1: AdditionalColorPoint {
+                index: 1,
+                point: ChromaticityPoint { x: 313, y: 329 },
+                gamma: Some(220),
+            },
+            point2: Some(AdditionalColorPoint {
+                index: 2,
+                point: ChromaticityPoint { x: 283, y: 298 },
+                gamma: None,
+            }),
+        };
+        block.set_monitor_descriptor(2, &descriptor).unwrap();
+        assert_eq!(block.monitor_descriptor(2).unwrap(), Some(descriptor));
+        assert_eq!(block.validate(), Ok(()));
+
+        // Rejection of invalid coordinates or gamma
+        let invalid_coord = MonitorDescriptor::AdditionalColorPoint {
+            point1: AdditionalColorPoint {
+                index: 1,
+                point: ChromaticityPoint { x: 1024, y: 300 },
+                gamma: None,
+            },
+            point2: None,
+        };
+        assert!(matches!(
+            block.set_monitor_descriptor(2, &invalid_coord),
+            Err(DescriptorError::InvalidChromaticityCoordinate { value: 1024 })
+        ));
+    }
+
+    #[test]
+    fn additional_standard_timings_descriptor_roundtrips() {
+        let mut block = EdidBlock::new_default();
+        let descriptor = MonitorDescriptor::AdditionalStandardTimings([
+            StandardTimingEntry::Timing(
+                StandardTiming::new(1920, StandardTimingAspectRatio::SixteenByNine, 60).unwrap(),
+            ),
+            StandardTimingEntry::Timing(
+                StandardTiming::new(1280, StandardTimingAspectRatio::FourByThree, 75).unwrap(),
+            ),
+            StandardTimingEntry::Unused,
+            StandardTimingEntry::Unused,
+            StandardTimingEntry::Unused,
+            StandardTimingEntry::Unused,
+        ]);
+        block.set_monitor_descriptor(3, &descriptor).unwrap();
+        assert_eq!(block.monitor_descriptor(3).unwrap(), Some(descriptor));
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn dummy_descriptor_roundtrips_and_preserves_checksum() {
+        let mut block = EdidBlock::new_default();
+        block
+            .set_monitor_descriptor(0, &MonitorDescriptor::Dummy)
+            .unwrap();
+        assert_eq!(
+            block.monitor_descriptor(0).unwrap(),
+            Some(MonitorDescriptor::Dummy)
+        );
+        assert_eq!(block.validate(), Ok(()));
     }
 }

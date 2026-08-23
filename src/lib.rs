@@ -27,9 +27,9 @@ pub use extensions::{
     ExtensionKind,
 };
 pub use metadata::{
-    BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, EstablishedTiming,
-    EstablishedTimings, MonitorDescriptor, StandardTiming, StandardTimingAspectRatio,
-    StandardTimingEntry,
+    AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,
+    EstablishedTiming, EstablishedTimings, MonitorDescriptor, StandardTiming,
+    StandardTimingAspectRatio, StandardTimingEntry,
 };
 pub use serialize::{
     ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions,

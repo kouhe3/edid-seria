@@ -171,6 +171,18 @@ pub enum DescriptorError {
     NonAsciiText,
     /// A range-limit field is outside its one-byte EDID representation.
     RangeOutOfBounds,
+    /// Chromaticity coordinate exceeds 10-bit range (0..=1023).
+    InvalidChromaticityCoordinate {
+        /// Coordinate value.
+        value: u16,
+    },
+    /// Gamma is outside the EDID representable range, in hundredths.
+    InvalidGamma {
+        /// Supplied gamma multiplied by 100.
+        value: u16,
+    },
+    /// Standard timing error in descriptor 0xFA.
+    StandardTimingError(MetadataWriteError),
 }
 impl fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -188,6 +200,13 @@ impl fmt::Display for DescriptorError {
             }
             Self::NonAsciiText => f.write_str("descriptor text must be ASCII"),
             Self::RangeOutOfBounds => f.write_str("descriptor range field is out of bounds"),
+            Self::InvalidChromaticityCoordinate { value } => {
+                write!(f, "descriptor chromaticity coordinate {value} exceeds 10 bits")
+            }
+            Self::InvalidGamma { value } => {
+                write!(f, "descriptor gamma value {value} is outside the EDID range")
+            }
+            Self::StandardTimingError(err) => write!(f, "descriptor standard timing error: {err}"),
         }
     }
 }
