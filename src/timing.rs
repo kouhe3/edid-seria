@@ -97,6 +97,11 @@ impl DetailedTiming {
             .map(|s| s.to_owned())
             .unwrap_or_else(|| format!("{}x{}_{:.2}", self.h_active, self.v_active, self.v_rate));
         let dot_clock = self.pixel_clock_khz as f64 / 1000.0;
+        let dot_clock_str = if self.pixel_clock_khz.is_multiple_of(10) {
+            format!("{dot_clock:.2}")
+        } else {
+            format!("{dot_clock:.3}")
+        };
         let h_sync_start = self.h_active + self.h_front;
         let h_sync_end = h_sync_start + self.h_sync;
         let h_total = self.h_total();
@@ -107,7 +112,7 @@ impl DetailedTiming {
         let v_pol_str = if self.v_pol { "+vsync" } else { "-vsync" };
 
         format!(
-            "Modeline \"{label}\" {dot_clock:.2} {} {h_sync_start} {h_sync_end} {h_total} {} {v_sync_start} {v_sync_end} {v_total} {h_pol_str} {v_pol_str}",
+            "Modeline \"{label}\" {dot_clock_str} {} {h_sync_start} {h_sync_end} {h_total} {} {v_sync_start} {v_sync_end} {v_total} {h_pol_str} {v_pol_str}",
             self.h_active, self.v_active
         )
     }
@@ -129,8 +134,16 @@ impl DetailedTiming {
             return Err(ModelineError::InsufficientTokens);
         }
 
-        // If the token starts with a quote or cannot parse as a float dot-clock, skip mode name
-        if tokens[idx].starts_with('"') || tokens[idx].parse::<f64>().is_err() {
+        // Skip mode name (may be quoted with spaces, quoted without spaces, or unquoted text)
+        if tokens[idx].starts_with('"') {
+            while idx < tokens.len() {
+                let token = tokens[idx];
+                idx += 1;
+                if (token.len() > 1 && token.ends_with('"')) || (token == "\"" && idx > 1) {
+                    break;
+                }
+            }
+        } else if tokens[idx].parse::<f64>().is_err() {
             idx += 1;
         }
 
@@ -166,6 +179,9 @@ impl DetailedTiming {
         let v_sync_end = parse_u32(tokens[idx + 7])?;
         let v_total = parse_u32(tokens[idx + 8])?;
 
+        if h_active == 0 || v_active == 0 {
+            return Err(ModelineError::InvalidGeometry("active area must be non-zero"));
+        }
         if h_sync_start < h_active {
             return Err(ModelineError::InvalidGeometry("hsync start < hactive"));
         }
@@ -184,7 +200,9 @@ impl DetailedTiming {
         if v_total < v_sync_end {
             return Err(ModelineError::InvalidGeometry("vtotal < vsync end"));
         }
-
+        if h_total == 0 || v_total == 0 {
+            return Err(ModelineError::InvalidGeometry("total area must be non-zero"));
+        }
         let pixel_clock_khz = (dot_clock_mhz * 1000.0).round() as u32;
         let h_front = h_sync_start - h_active;
         let h_sync = h_sync_end - h_sync_start;
@@ -1474,6 +1492,21 @@ mod tests {
         assert_eq!(parsed_raw.h_active, 1920);
         assert!(parsed_raw.h_pol);
         assert!(!parsed_raw.v_pol);
+
+        // Mode name with spaces in quotes
+        let spaced_name =
+            "Modeline \"1920x1080 @ 60Hz\" 148.50 1920 2008 2052 2200 1080 1084 1089 1125 +hsync +vsync";
+        let parsed_spaced = DetailedTiming::from_modeline(spaced_name).unwrap();
+        assert_eq!(parsed_spaced.h_active, 1920);
+        assert_eq!(parsed_spaced.pixel_clock_khz, 148500);
+
+        // kHz dot-clock precision preservation (3 decimal places)
+        let mut precise = original.clone();
+        precise.pixel_clock_khz = 74176;
+        let precise_modeline = precise.to_modeline(Some("720p59.94"));
+        assert!(precise_modeline.contains(" 74.176 "));
+        let parsed_precise = DetailedTiming::from_modeline(&precise_modeline).unwrap();
+        assert_eq!(parsed_precise.pixel_clock_khz, 74176);
     }
 
     #[test]
@@ -1484,6 +1517,13 @@ mod tests {
             "Modeline \"bad\" 148.50 1920 1900 2052 2200 1080 1084 1089 1125 +hsync +vsync";
         assert!(matches!(
             DetailedTiming::from_modeline(bad_geom),
+            Err(ModelineError::InvalidGeometry(_))
+        ));
+
+        let zero_area =
+            "Modeline \"zero\" 148.50 0 0 0 0 1080 1084 1089 1125 +hsync +vsync";
+        assert!(matches!(
+            DetailedTiming::from_modeline(zero_area),
             Err(ModelineError::InvalidGeometry(_))
         ));
 

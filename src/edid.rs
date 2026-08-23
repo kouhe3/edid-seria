@@ -630,6 +630,11 @@ pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, crate::error::HexError
             if let Some(&(_, next_ch)) = clone.peek()
                 && (next_ch == 'x' || next_ch == 'X')
             {
+                if current_nibble.is_some() {
+                    return Err(HexError::OddLength {
+                        length: bytes.len() * 2 + 1,
+                    });
+                }
                 chars.next();
                 chars.next();
                 continue;
@@ -1136,6 +1141,12 @@ mod tests {
         assert!(matches!(
             EdidBlock::from_hex("00FFGG"),
             Err(HexError::InvalidHexCharacter { character: 'G', .. })
+        ));
+
+        // Odd nibble before 0x prefix
+        assert!(matches!(
+            EdidBlock::from_hex("A 0x12"),
+            Err(HexError::OddLength { length: 1 })
         ));
 
         // Invalid length (not 128 bytes)

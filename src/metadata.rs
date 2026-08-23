@@ -786,6 +786,9 @@ fn decode_color_point(data: &[u8]) -> Option<AdditionalColorPoint> {
 }
 
 fn encode_color_point(cp: &AdditionalColorPoint, target: &mut [u8]) -> Result<(), DescriptorError> {
+    if cp.index == 0 {
+        return Err(DescriptorError::RangeOutOfBounds);
+    }
     if cp.point.x > 1023 {
         return Err(DescriptorError::InvalidChromaticityCoordinate { value: cp.point.x });
     }
@@ -1050,6 +1053,19 @@ mod tests {
         assert!(matches!(
             block.set_monitor_descriptor(2, &invalid_coord),
             Err(DescriptorError::InvalidChromaticityCoordinate { value: 1024 })
+        ));
+
+        let invalid_index = MonitorDescriptor::AdditionalColorPoint {
+            point1: AdditionalColorPoint {
+                index: 0,
+                point: ChromaticityPoint { x: 300, y: 300 },
+                gamma: None,
+            },
+            point2: None,
+        };
+        assert!(matches!(
+            block.set_monitor_descriptor(2, &invalid_index),
+            Err(DescriptorError::RangeOutOfBounds)
         ));
     }
 
