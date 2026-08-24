@@ -28,8 +28,10 @@ pub use extensions::{
 };
 pub use metadata::{
     AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,
-    EstablishedTiming, EstablishedTimings, MonitorDescriptor, StandardTiming,
-    StandardTimingAspectRatio, StandardTimingEntry,
+    ColorManagementDescriptor, Cvt3ByteTimingEntry, CvtAspectRatio, CvtPreferredRate,
+    CvtRangeSupport, CvtSupportedRates, EstablishedTiming, EstablishedTiming3, EstablishedTimings,
+    EstablishedTimings3, MonitorDescriptor, RangeLimitsExtension, SecondaryGtfParameters,
+    StandardTiming, StandardTimingAspectRatio, StandardTimingEntry,
 };
 pub use serialize::{
     ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions,

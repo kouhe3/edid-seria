@@ -331,9 +331,11 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
 #[test]
 fn dtd_and_metadata_property_roundtrips() {
     use edid_seria::{
-        BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, DetailedTiming,
-        EstablishedTiming, EstablishedTimings, StandardTiming, StandardTimingAspectRatio,
-        StandardTimingEntry,
+        BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, ColorManagementDescriptor,
+        Cvt3ByteTimingEntry, CvtAspectRatio, CvtPreferredRate, CvtRangeSupport, CvtSupportedRates,
+        DetailedTiming, EstablishedTiming, EstablishedTiming3, EstablishedTimings,
+        EstablishedTimings3, MonitorDescriptor, RangeLimitsExtension, SecondaryGtfParameters,
+        StandardTiming, StandardTimingAspectRatio, StandardTimingEntry,
     };
 
     // Property: BaseMetadata roundtrips cleanly on valid inputs
@@ -419,4 +421,76 @@ fn dtd_and_metadata_property_roundtrips() {
     assert_eq!(decoded.pixel_clock_khz, timing.pixel_clock_khz);
     assert_eq!(decoded.h_pol, timing.h_pol);
     assert_eq!(decoded.v_pol, timing.v_pol);
+
+    // Property: EstablishedTimings3 roundtrips cleanly
+    let mut et3 = EstablishedTimings3::default();
+    et3.set_timing(EstablishedTiming3::Res1920x1200_60HzRb, true);
+    et3.set_timing(EstablishedTiming3::Res1680x1050_60Hz, true);
+    let et3_desc = MonitorDescriptor::EstablishedTimings3(et3);
+    block.set_monitor_descriptor(1, &et3_desc).unwrap();
+    assert_eq!(block.monitor_descriptor(1).unwrap(), Some(et3_desc));
+
+    // Property: Cvt3ByteTimings roundtrips cleanly
+    let cvt_desc = MonitorDescriptor::Cvt3ByteTimings([
+        Cvt3ByteTimingEntry::Active {
+            addressable_lines: 1200,
+            aspect_ratio: CvtAspectRatio::Ratio16x10,
+            preferred_rate: CvtPreferredRate::Hz60,
+            supported_rates: CvtSupportedRates { raw: 0x48 },
+        },
+        Cvt3ByteTimingEntry::Unused,
+        Cvt3ByteTimingEntry::Unused,
+        Cvt3ByteTimingEntry::Unused,
+    ]);
+    block.set_monitor_descriptor(2, &cvt_desc).unwrap();
+    assert_eq!(block.monitor_descriptor(2).unwrap(), Some(cvt_desc));
+
+    // Property: ColorManagementDescriptor and RangeLimits with GTF/CVT extensions roundtrip
+    let dcm_desc = MonitorDescriptor::ColorManagement(ColorManagementDescriptor {
+        revision: 3,
+        red_a3: 100,
+        red_a2: 200,
+        green_a3: 300,
+        green_a2: 400,
+        blue_a3: 500,
+        blue_a2: 600,
+    });
+    block.set_monitor_descriptor(2, &dcm_desc).unwrap();
+    assert_eq!(block.monitor_descriptor(2).unwrap(), Some(dcm_desc));
+    let gtf_range = MonitorDescriptor::RangeLimits {
+        min_vertical_hz: 50,
+        max_vertical_hz: 120,
+        min_horizontal_khz: 31,
+        max_horizontal_khz: 135,
+        max_pixel_clock_mhz: 300,
+        extension: RangeLimitsExtension::SecondaryGtf(SecondaryGtfParameters {
+            start_frequency_c_khz: 80,
+            slope_m: 600,
+            offset_k: 40,
+            scaling_j: 20,
+        }),
+    };
+    block.set_monitor_descriptor(3, &gtf_range).unwrap();
+    assert_eq!(block.monitor_descriptor(3).unwrap(), Some(gtf_range));
+    assert_eq!(block.validate(), Ok(()));
+
+    let cvt_range = MonitorDescriptor::RangeLimits {
+        min_vertical_hz: 48,
+        max_vertical_hz: 165,
+        min_horizontal_khz: 30,
+        max_horizontal_khz: 250,
+        max_pixel_clock_mhz: 650,
+        extension: RangeLimitsExtension::Cvt(CvtRangeSupport {
+            revision: 0x11,
+            max_pixel_clock_precision: 0x10,
+            max_active_pixels: 2560,
+            supported_aspect_ratios: 0xC0,
+            preferred_aspect_ratio_and_flags: 0x28,
+            scaling_support: 0x00,
+            preferred_vertical_rate_hz: 144,
+        }),
+    };
+    block.set_monitor_descriptor(3, &cvt_range).unwrap();
+    assert_eq!(block.monitor_descriptor(3).unwrap(), Some(cvt_range));
+    assert_eq!(block.validate(), Ok(()));
 }
