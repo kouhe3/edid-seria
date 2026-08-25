@@ -461,54 +461,111 @@ pub enum DisplayIdDataBlockView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExtensionWriteError {
+    /// CTA data-block tag does not fit its three-bit field.
     InvalidCtaTag {
+        /// Supplied tag.
         tag: u8,
     },
+    /// CTA data-block payload exceeds its five-bit length field.
     CtaPayloadTooLong {
+        /// Supplied length.
         length: usize,
+        /// Maximum length.
         maximum: usize,
     },
+    /// A CTA data block is shorter than the typed representation requires.
+    CtaPayloadTooShort {
+        /// CTA data-block tag.
+        tag: u8,
+        /// Supplied payload length.
+        length: usize,
+        /// Minimum representable payload length.
+        minimum: usize,
+    },
+    /// A raw extended CTA payload has the wrong extended tag or is empty.
+    InvalidCtaExtendedPayload {
+        /// Expected extended tag.
+        expected_tag: u8,
+        /// Actual first byte, if present.
+        actual_tag: Option<u8>,
+        /// Supplied payload length.
+        length: usize,
+    },
+    /// HDR luminance fields must be present as a contiguous prefix.
+    InvalidCtaHdrLuminanceOrder,
+    /// A CTA Video Identification Code cannot fit its seven-bit field.
     InvalidCtaVideoCode {
+        /// Zero-based mode index.
         index: usize,
+        /// Supplied VIC.
         vic: u8,
     },
+    /// A CTA audio format cannot fit its four-bit field.
     InvalidCtaAudioFormat {
+        /// Zero-based descriptor index.
         index: usize,
+        /// Supplied format.
         format: u8,
     },
+    /// A CTA audio channel count is outside 1..=8.
     InvalidCtaAudioChannels {
+        /// Zero-based descriptor index.
         index: usize,
+        /// Supplied channel count.
         channels: u8,
     },
+    /// A CTA audio descriptor uses the reserved sample-rate bit.
     InvalidCtaAudioSampleRates {
+        /// Zero-based descriptor index.
         index: usize,
+        /// Supplied mask.
         sample_rates: u8,
     },
+    /// A CTA bitfield value is outside its encoded range.
     InvalidCtaField {
+        /// Field name.
         field: &'static str,
+        /// Supplied value.
         value: u8,
+        /// Maximum value.
         maximum: u8,
     },
+    /// A typed CTA variant does not yet expose enough fields for safe encoding.
     UnsupportedCtaTypedEncoding {
+        /// Variant name.
         kind: &'static str,
     },
+    /// The complete CTA data-block collection does not fit before byte 127.
     CtaDataBlocksTooLong {
+        /// Supplied collection length.
         length: usize,
+        /// Maximum collection length.
         maximum: usize,
     },
+    /// The CTA DTD collection exceeds available slots.
     CtaDtdsTooLong {
+        /// Supplied DTD count.
         count: usize,
+        /// Maximum slot count.
         maximum: usize,
     },
+    /// A CTA DTD cannot be represented.
     CtaDtdInvalid {
+        /// Zero-based DTD index.
         index: usize,
+        /// Underlying error.
         source: crate::error::DtdError,
     },
+    /// The DisplayID payload cannot fit in one extension.
     DisplayIdPayloadTooLong {
+        /// Encoded payload length.
         length: usize,
+        /// Maximum length.
         maximum: usize,
     },
+    /// The target block is not a CTA-861 extension.
     NotCta861,
+    /// The target block is not a DisplayID extension.
     NotDisplayId,
 }
 impl std::fmt::Display for ExtensionWriteError {
@@ -540,6 +597,25 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "CTA audio sample-rate mask 0x{sample_rates:02X} at index {index} uses a reserved bit"
             ),
+            Self::CtaPayloadTooShort {
+                tag,
+                length,
+                minimum,
+            } => write!(
+                f,
+                "CTA data-block tag {tag} payload length {length} is below minimum {minimum}"
+            ),
+            Self::InvalidCtaExtendedPayload {
+                expected_tag,
+                actual_tag,
+                length,
+            } => write!(
+                f,
+                "CTA extended payload length {length} has tag {actual_tag:?}, expected {expected_tag}"
+            ),
+            Self::InvalidCtaHdrLuminanceOrder => {
+                f.write_str("CTA HDR luminance fields must be a contiguous prefix")
+            }
             Self::InvalidCtaField {
                 field,
                 value,
@@ -578,9 +654,10 @@ impl CtaDataBlockView {
         (match self {
             Self::Video { modes } => {
                 if modes.is_empty() {
-                    return Err(ExtensionWriteError::CtaPayloadTooLong {
+                    return Err(ExtensionWriteError::CtaPayloadTooShort {
+                        tag: 2,
                         length: 0,
-                        maximum: 31,
+                        minimum: 1,
                     });
                 }
                 let mut payload = Vec::with_capacity(modes.len());
@@ -597,9 +674,10 @@ impl CtaDataBlockView {
             }
             Self::Audio { descriptors } => {
                 if descriptors.is_empty() {
-                    return Err(ExtensionWriteError::CtaPayloadTooLong {
+                    return Err(ExtensionWriteError::CtaPayloadTooShort {
+                        tag: 1,
                         length: 0,
-                        maximum: 31,
+                        minimum: 3,
                     });
                 }
                 let mut payload = Vec::with_capacity(descriptors.len() * 3);
@@ -650,10 +728,19 @@ impl CtaDataBlockView {
                     payload: encoded,
                 })
             }
-            Self::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw }) => Ok(CtaDataBlock {
-                tag: 7,
-                payload: raw.clone(),
-            }),
+            Self::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw }) => {
+                if raw.first().copied() != Some(0x1A) {
+                    return Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                        expected_tag: 0x1A,
+                        actual_tag: raw.first().copied(),
+                        length: raw.len(),
+                    });
+                }
+                Ok(CtaDataBlock {
+                    tag: 7,
+                    payload: raw.clone(),
+                })
+            }
             Self::VendorSpecific(CtaVendorSpecificBlock::Other { oui, payload }) => {
                 let mut encoded = Vec::with_capacity(payload.len() + 3);
                 encoded.extend_from_slice(oui);
@@ -719,15 +806,28 @@ impl CtaDataBlockView {
                 min_luminance,
                 raw,
             }) => {
-                let mut payload = vec![0x06, *eotf_flags, *metadata_descriptor_flags];
-                for value in [max_luminance, max_frame_average_luminance, min_luminance]
-                    .into_iter()
-                    .flatten()
+                if max_luminance.is_none()
+                    && (max_frame_average_luminance.is_some() || min_luminance.is_some())
+                    || max_frame_average_luminance.is_none() && min_luminance.is_some()
                 {
+                    return Err(ExtensionWriteError::InvalidCtaHdrLuminanceOrder);
+                }
+                let known_length = 3
+                    + usize::from(max_luminance.is_some())
+                    + usize::from(max_frame_average_luminance.is_some())
+                    + usize::from(min_luminance.is_some());
+                let mut payload = vec![0x06, *eotf_flags, *metadata_descriptor_flags];
+                if let Some(value) = max_luminance {
                     payload.push(*value);
                 }
-                if raw.len() > payload.len() && raw.first() == Some(&0x06) {
-                    payload.extend_from_slice(&raw[payload.len()..]);
+                if let Some(value) = max_frame_average_luminance {
+                    payload.push(*value);
+                }
+                if let Some(value) = min_luminance {
+                    payload.push(*value);
+                }
+                if raw.len() > known_length && raw.first() == Some(&0x06) {
+                    payload.extend_from_slice(&raw[known_length..]);
                 }
                 Ok(CtaDataBlock { tag: 7, payload })
             }
@@ -2583,6 +2683,60 @@ mod tests {
                 index: 0,
                 channels: 0
             })
+        ));
+    }
+    #[test]
+    fn rejects_empty_and_malformed_cta_typed_payloads() {
+        assert!(matches!(
+            (CtaDataBlockView::Video { modes: vec![] }).to_data_block(),
+            Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 2,
+                length: 0,
+                minimum: 1
+            })
+        ));
+        assert!(matches!(
+            (CtaDataBlockView::Audio {
+                descriptors: vec![]
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 1,
+                length: 0,
+                minimum: 3
+            })
+        ));
+        assert!(matches!(
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw: vec![] })
+                .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x1A,
+                actual_tag: None,
+                length: 0
+            })
+        ));
+        assert!(matches!(
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync {
+                raw: vec![0x05, 0x01]
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x1A,
+                actual_tag: Some(0x05),
+                length: 2
+            })
+        ));
+        assert!(matches!(
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+                eotf_flags: 0,
+                metadata_descriptor_flags: 0,
+                max_luminance: None,
+                max_frame_average_luminance: Some(0x20),
+                min_luminance: None,
+                raw: vec![],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaHdrLuminanceOrder)
         ));
     }
 
