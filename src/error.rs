@@ -183,6 +183,22 @@ pub enum DescriptorError {
     },
     /// Standard timing error in descriptor 0xFA.
     StandardTimingError(MetadataWriteError),
+    /// Invalid descriptor revision number.
+    InvalidRevision {
+        /// Descriptor tag byte.
+        tag: u8,
+        /// Found revision byte.
+        revision: u8,
+    },
+    /// Invalid Range Limits extension definition code or parameters.
+    InvalidRangeExtension,
+    /// Invalid CVT 3-byte timing code entry.
+    InvalidCvtTiming {
+        /// CVT slot index (0..4).
+        slot: usize,
+        /// Detailed reason.
+        reason: &'static str,
+    },
 }
 impl fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -213,6 +229,16 @@ impl fmt::Display for DescriptorError {
                 )
             }
             Self::StandardTimingError(err) => write!(f, "descriptor standard timing error: {err}"),
+            Self::InvalidRevision { tag, revision } => {
+                write!(
+                    f,
+                    "invalid revision {revision:#04X} for descriptor tag {tag:#04X}"
+                )
+            }
+            Self::InvalidRangeExtension => f.write_str("invalid range limits extension parameters"),
+            Self::InvalidCvtTiming { slot, reason } => {
+                write!(f, "invalid CVT 3-byte timing at slot {slot}: {reason}")
+            }
         }
     }
 }

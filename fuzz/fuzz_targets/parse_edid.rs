@@ -22,6 +22,9 @@ fuzz_target!(|data: &[u8]| {
         let _ = block.chromaticity();
         let _ = block.established_timings();
         let _ = block.standard_timings();
+        for slot in 0..4 {
+            let _ = block.monitor_descriptor(slot);
+        }
         let _ = block.cta_header();
         let _ = block.cta_detailed_timings();
         let _ = block.cta_detailed_timings_flagged();

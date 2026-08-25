@@ -7,14 +7,20 @@
 
 use edid_seria::{
     CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock, Edid, EdidBlock,
+    EstablishedTiming3, EstablishedTimings3, MonitorDescriptor,
 };
 
 fn main() {
     // A sample 2-block EDID (Base block + CTA-861 extension)
     let mut base = EdidBlock::new_default();
     base.raw[126] = 1; // 1 extension
+    base.set_monitor_descriptor(1, &MonitorDescriptor::ProductName("SAM-27QHD".to_owned()))
+        .unwrap();
+    let mut et3 = EstablishedTimings3::default();
+    et3.set_timing(EstablishedTiming3::Res1920x1200_60Hz, true);
+    base.set_monitor_descriptor(2, &MonitorDescriptor::EstablishedTimings3(et3))
+        .unwrap();
     base.update_checksum();
-
     let mut cta = EdidBlock::new_default();
     cta.raw[0] = 0x02; // CTA-861 extension tag
     cta.raw[1] = 0x03; // Revision 3
@@ -78,6 +84,83 @@ fn main() {
             timing.v_sync,
             timing.v_back,
         );
+    }
+
+    println!("\nBase Block Monitor Descriptors:");
+    for slot in 0..4 {
+        match edid.base.monitor_descriptor(slot) {
+            Ok(Some(desc)) => match desc {
+                MonitorDescriptor::ProductName(name) => {
+                    println!("  [Slot {slot}] Product Name: \"{name}\"");
+                }
+                MonitorDescriptor::SerialNumber(serial) => {
+                    println!("  [Slot {slot}] Serial Number: \"{serial}\"");
+                }
+                MonitorDescriptor::AlphanumericString(text) => {
+                    println!("  [Slot {slot}] Alphanumeric String: \"{text}\"");
+                }
+                MonitorDescriptor::EstablishedTimings3(et3) => {
+                    println!(
+                        "  [Slot {slot}] Established Timings III (rev {:#04X}): 1920x1200@60Hz={}",
+                        et3.revision,
+                        et3.has_timing(EstablishedTiming3::Res1920x1200_60Hz)
+                    );
+                }
+                MonitorDescriptor::Cvt3ByteTimings(cvts) => {
+                    println!(
+                        "  [Slot {slot}] CVT 3-Byte Timing Codes: {} slots",
+                        cvts.len()
+                    );
+                }
+                MonitorDescriptor::ColorManagement(dcm) => {
+                    println!(
+                        "  [Slot {slot}] Color Management (rev {:#04X})",
+                        dcm.revision
+                    );
+                }
+                MonitorDescriptor::RangeLimits {
+                    min_vertical_hz,
+                    max_vertical_hz,
+                    min_horizontal_khz,
+                    max_horizontal_khz,
+                    max_pixel_clock_mhz,
+                    extension,
+                } => {
+                    println!(
+                        "  [Slot {slot}] Range Limits: V: {min_vertical_hz}-{max_vertical_hz}Hz, H: {min_horizontal_khz}-{max_horizontal_khz}kHz, Clock: {max_pixel_clock_mhz}MHz, Ext: {extension:?}"
+                    );
+                }
+                MonitorDescriptor::AdditionalColorPoint { point1, point2 } => {
+                    println!(
+                        "  [Slot {slot}] Additional Color Point: #{} (gamma: {:?}), second: {}",
+                        point1.index,
+                        point1.gamma,
+                        point2.is_some()
+                    );
+                }
+                MonitorDescriptor::AdditionalStandardTimings(timings) => {
+                    println!(
+                        "  [Slot {slot}] Additional Standard Timings: {} entries",
+                        timings.len()
+                    );
+                }
+                MonitorDescriptor::Dummy => {
+                    println!("  [Slot {slot}] Dummy Descriptor");
+                }
+                MonitorDescriptor::Unknown { tag, payload } => {
+                    println!(
+                        "  [Slot {slot}] Unknown Descriptor: Tag {tag:#04X}, len {}",
+                        payload.len()
+                    );
+                }
+            },
+            Ok(None) => {
+                println!("  [Slot {slot}] <Timing Slot or Unused>");
+            }
+            Err(err) => {
+                println!("  [Slot {slot}] Error: {err}");
+            }
+        }
     }
 
     for (idx, ext) in edid.extensions.iter().enumerate() {

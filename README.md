@@ -21,8 +21,8 @@ CRU-style display override tools.
  - **Strict parsing** — validated complete EDID sequences with base-header,
    checksum, version, extension-count, and structured error reporting.
  - **Metadata and descriptors** — typed base-block identity, chromaticity
-   fixed-point coordinates, Established Timings, Standard Timings, and common
-   monitor descriptors (name, serial, alphanumeric string, color point, additional standard timings, range limits, dummy), with unknown descriptor payload preservation.
+   fixed-point coordinates, Established Timings, Standard Timings, and complete
+   EDID 1.4 standard monitor descriptors (name, serial, alphanumeric string, color point, additional standard timings, Established Timings III, CVT 3-byte timing codes, Display Color Management, and extended Range Limits with Secondary GTF & CVT support), with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
 - **Extension views** — typed read-only CTA-861 views (header/capabilities, video, audio, speaker allocation, HDMI 1.4b/2.0+, AMD FreeSync, Dolby Vision VSDBs, colorimetry, video capability, HDR static metadata, Adaptive-Sync, and CTA DTD iteration), DisplayID headers, Product Identification, Display Parameters, Type I/Type VII Detailed Timing, embedded CTA, and raw unknown-block views. Extension generation/reordering remains out of scope.
