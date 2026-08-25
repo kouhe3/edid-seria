@@ -91,6 +91,13 @@ impl EdidBlock {
         // Digital display (bit 7); interface/color-depth undefined — the
         // typical starting point for a modern PC-monitor override.
         raw[20] = 0x80;
+        // Unused standard timing entries use 01 01.
+        raw[38..54].fill(0x01);
+        // Unused descriptor slots use the dummy descriptor tag 0x10.
+        for slot in 0..DETAILED_SLOTS {
+            let offset = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
+            raw[offset + 3] = 0x10;
+        }
         // Extension count = 0
         raw[126] = 0x00;
         let mut block = Self { raw };
@@ -110,8 +117,9 @@ impl EdidBlock {
     }
     /// Parse and validate exactly one EDID block.
     ///
-    /// Base blocks must contain the EDID header. Extension blocks are accepted
-    /// by their non-zero tag and are validated by checksum only.
+    /// This accepts either a base block or an extension block. Callers that
+    /// know the block is an extension must use [`Self::validate_extension`]
+    /// so a base block cannot be accepted in that position.
     pub fn from_bytes_checked(data: &[u8]) -> Result<Self, EdidError> {
         if data.len() != EDID_BLOCK_SIZE {
             return Err(EdidError::InvalidLength {
@@ -139,6 +147,17 @@ impl EdidBlock {
             return Err(EdidError::InvalidChecksum { sum });
         }
         Ok(())
+    }
+    /// Validate this block as an EDID extension.
+    ///
+    /// Extension blocks must have a non-zero tag. In particular, a complete
+    /// base block with the EDID header is not a valid extension, even though
+    /// it is accepted by [`Self::from_bytes_checked`] as a standalone block.
+    pub fn validate_extension(&self) -> Result<(), EdidError> {
+        if self.raw[0] == 0 {
+            return Err(EdidError::InvalidHeader);
+        }
+        self.validate()
     }
 
     /// Read a progressive detailed timing from slot (0-3).
@@ -504,7 +523,9 @@ impl Edid {
         let mut extensions = Vec::with_capacity(actual);
         let (extension_chunks, _) = data[EDID_BLOCK_SIZE..].as_chunks::<EDID_BLOCK_SIZE>();
         for chunk in extension_chunks {
-            extensions.push(EdidBlock::from_bytes_checked(chunk)?);
+            let extension = EdidBlock::from_bytes_checked(chunk)?;
+            extension.validate_extension()?;
+            extensions.push(extension);
         }
 
         Ok(Self { base, extensions })
@@ -520,6 +541,19 @@ impl Edid {
         }
         bytes
     }
+    /// Validate this EDID before a checked serialization.
+    pub fn validate_for_serialization(&self) -> Result<(), EdidError> {
+        self.validate()
+    }
+
+    /// Validate and return the complete EDID as contiguous bytes.
+    ///
+    /// Unlike [`Self::to_bytes`], this method checks the base block, extension
+    /// count, and every extension checksum before producing output.
+    pub fn to_bytes_checked(&self) -> Result<Vec<u8>, EdidError> {
+        self.validate_for_serialization()?;
+        Ok(self.to_bytes())
+    }
 
     /// Validate the base block and every extension block.
     pub fn validate(&self) -> Result<(), EdidError> {
@@ -530,9 +564,59 @@ impl Edid {
             return Err(EdidError::ExtensionCountMismatch { declared, actual });
         }
         for extension in &self.extensions {
-            extension.validate()?;
+            extension.validate_extension()?;
         }
         Ok(())
+    }
+    /// Insert a validated extension at `index`, updating the base extension count.
+    pub fn insert_extension(
+        &mut self,
+        index: usize,
+        extension: EdidBlock,
+    ) -> Result<(), EdidError> {
+        if index > self.extensions.len() {
+            return Err(EdidError::ExtensionIndexOutOfRange {
+                index,
+                count: self.extensions.len(),
+            });
+        }
+        extension.validate_extension()?;
+        if self.extensions.len() >= u8::MAX as usize {
+            return Err(EdidError::TooManyExtensions {
+                count: self.extensions.len() + 1,
+            });
+        }
+        self.extensions.insert(index, extension);
+        self.base.raw[126] = self.extensions.len() as u8;
+        self.base.update_checksum();
+        Ok(())
+    }
+
+    /// Replace a validated extension at `index`, preserving extension ordering.
+    pub fn replace_extension(
+        &mut self,
+        index: usize,
+        extension: EdidBlock,
+    ) -> Result<(), EdidError> {
+        extension.validate_extension()?;
+        let Some(target) = self.extensions.get_mut(index) else {
+            return Err(EdidError::ExtensionIndexOutOfRange {
+                index,
+                count: self.extensions.len(),
+            });
+        };
+        *target = extension;
+        Ok(())
+    }
+
+    /// Remove an extension and update the base extension count.
+    pub fn remove_extension(&mut self, index: usize) -> Option<EdidBlock> {
+        let extension = (index < self.extensions.len()).then(|| self.extensions.remove(index));
+        if extension.is_some() {
+            self.base.raw[126] = self.extensions.len() as u8;
+            self.base.update_checksum();
+        }
+        extension
     }
 
     /// Format the complete EDID sequence (base + extensions) as continuous hex.
@@ -835,6 +919,48 @@ mod tests {
         assert_eq!(edid.extensions.len(), 1);
         assert_eq!(edid.extensions[0].raw[0], 0x02);
         assert_eq!(edid.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn checked_output_preserves_valid_edid_bytes() {
+        let mut base = EdidBlock::new_default();
+        let mut extension = EdidBlock::new_default();
+        extension.raw[0] = 0x02;
+        extension.raw[1] = 0x03;
+        extension.update_checksum();
+        base.raw[126] = 1;
+        base.update_checksum();
+
+        let mut bytes = base.as_bytes().to_vec();
+        bytes.extend_from_slice(extension.as_bytes());
+        let edid = Edid::from_bytes(&bytes).unwrap();
+
+        assert_eq!(edid.to_bytes_checked().unwrap(), bytes);
+    }
+
+    #[test]
+    fn checked_output_rejects_invalid_aggregate_state() {
+        let mut invalid_checksum = Edid {
+            base: EdidBlock::new_default(),
+            extensions: Vec::new(),
+        };
+        invalid_checksum.base.raw[10] ^= 1;
+        assert!(matches!(
+            invalid_checksum.to_bytes_checked(),
+            Err(EdidError::InvalidChecksum { .. })
+        ));
+
+        let invalid_count = Edid {
+            base: EdidBlock::new_default(),
+            extensions: vec![EdidBlock::new_default()],
+        };
+        assert!(matches!(
+            invalid_count.to_bytes_checked(),
+            Err(EdidError::ExtensionCountMismatch {
+                declared: 0,
+                actual: 1
+            })
+        ));
     }
 
     #[test]
@@ -1253,5 +1379,47 @@ mod tests {
         assert_eq!(all_timings.len(), 2);
         assert_eq!(all_timings[0].h_active, 1920);
         assert_eq!(all_timings[1].h_active, 1920);
+    }
+    #[test]
+    fn default_block_uses_edid_unused_slot_encodings() {
+        let block = EdidBlock::new_default();
+        assert_eq!(&block.raw[38..54], &[0x01u8, 0x01].repeat(8));
+        for slot in 0..4 {
+            let offset = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
+            assert_eq!(block.raw[offset..offset + 4], [0, 0, 0, 0x10]);
+        }
+    }
+
+    #[test]
+    fn manages_extension_lifecycle_and_checked_output() {
+        let mut edid = Edid {
+            base: EdidBlock::new_default(),
+            extensions: Vec::new(),
+        };
+        let extension = EdidBlock::from_cta_data_blocks(3, &[]).unwrap();
+        edid.insert_extension(0, extension.clone()).unwrap();
+        assert_eq!(edid.extensions, vec![extension.clone()]);
+        assert_eq!(edid.base.raw[126], 1);
+        edid.replace_extension(0, extension.clone()).unwrap();
+        assert_eq!(edid.remove_extension(0), Some(extension));
+        assert!(edid.extensions.is_empty());
+        assert_eq!(edid.base.raw[126], 0);
+        assert!(edid.to_bytes_checked().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_extensions_without_mutation() {
+        let mut edid = Edid {
+            base: EdidBlock::new_default(),
+            extensions: Vec::new(),
+        };
+        let before = edid.clone();
+        let mut invalid = EdidBlock::new_default();
+        invalid.raw[0] = 0x02;
+        assert!(matches!(
+            edid.insert_extension(0, invalid),
+            Err(EdidError::InvalidChecksum { .. })
+        ));
+        assert_eq!(edid, before);
     }
 }

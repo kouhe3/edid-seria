@@ -49,10 +49,14 @@ pub struct SerializedEdid {
 ///
 /// `existing` is the display's current EDID (registry override or original
 /// EDID); `None` or data shorter than one block starts from a minimal default
-/// block. A trailing partial block (length not a multiple of 128) is dropped.
-/// The base block's detailed-timing slots are rewritten, monitor descriptors
-/// are preserved, every block's checksum is fixed, and the extension count
-/// byte is normalized to the number of blocks actually present.
+/// block. A trailing partial block is dropped, and at most 255 extension
+/// blocks are retained because the base-block count is one byte. The base
+/// block's detailed-timing slots are rewritten, monitor descriptors are
+/// preserved, every retained block's checksum is fixed, and the extension
+/// count byte is normalized to the retained blocks.
+///
+/// This compatibility API may discard malformed or excess input. Use
+/// [`serialize_resolutions_checked`] when every input block must be retained.
 #[must_use]
 pub fn serialize_resolutions(
     existing: Option<&[u8]>,
@@ -63,6 +67,7 @@ pub fn serialize_resolutions(
         .map(|data| {
             data.chunks(EDID_BLOCK_SIZE)
                 .filter_map(EdidBlock::from_bytes)
+                .take(u8::MAX as usize + 1)
                 .collect()
         })
         .unwrap_or_default();
@@ -132,6 +137,10 @@ fn parse_existing_blocks(existing: Option<&[u8]>) -> Result<Vec<EdidBlock>, Seri
         if index == 0 {
             block
                 .validate_base()
+                .map_err(|source| SerializeError::InvalidExistingBlock { index, source })?;
+        } else {
+            block
+                .validate_extension()
                 .map_err(|source| SerializeError::InvalidExistingBlock { index, source })?;
         }
         blocks.push(block);
@@ -381,6 +390,28 @@ mod tests {
             serialize_resolutions(Some(&[0u8; 100]), &[spec(1920, 1080, 60.0, TimingKind::Pc)]);
         assert_eq!(out.written, 1);
         assert_eq!(out.bytes.len(), EDID_BLOCK_SIZE);
+        checksum_ok(&out.bytes);
+    }
+
+    #[test]
+    fn compatibility_serializer_does_not_wrap_extension_count() {
+        let mut existing = Vec::with_capacity(257 * EDID_BLOCK_SIZE);
+        let mut base = EdidBlock::new_default();
+        base.raw[126] = u8::MAX;
+        base.update_checksum();
+        existing.extend_from_slice(base.as_bytes());
+
+        for index in 0..=u8::MAX {
+            let mut extension = EdidBlock::new_default();
+            extension.raw[0] = 0x02;
+            extension.raw[1] = index;
+            extension.update_checksum();
+            existing.extend_from_slice(extension.as_bytes());
+        }
+
+        let out = serialize_resolutions(Some(&existing), &[]);
+        assert_eq!(out.bytes.len(), 256 * EDID_BLOCK_SIZE);
+        assert_eq!(out.bytes[126], u8::MAX);
         checksum_ok(&out.bytes);
     }
 

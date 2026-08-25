@@ -25,6 +25,7 @@ pub use extensions::{
     CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
     DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
     DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
+    ExtensionWriteError,
 };
 pub use metadata::{
     AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,

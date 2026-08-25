@@ -457,7 +457,128 @@ pub enum DisplayIdDataBlockView {
     },
 }
 
+/// Errors returned while encoding EDID extension structures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExtensionWriteError {
+    /// CTA data-block tag does not fit its three-bit field.
+    InvalidCtaTag {
+        /// Supplied tag value.
+        tag: u8,
+    },
+    /// CTA data-block payload exceeds its five-bit length field.
+    CtaPayloadTooLong {
+        /// Supplied payload length.
+        length: usize,
+        /// Maximum representable payload length.
+        maximum: usize,
+    },
+    /// The complete CTA data-block collection does not fit before byte 127.
+    CtaDataBlocksTooLong {
+        /// Supplied collection length.
+        length: usize,
+        /// Maximum collection length.
+        maximum: usize,
+    },
+    /// The CTA DTD collection exceeds the available 18-byte slots.
+    CtaDtdsTooLong {
+        /// Supplied DTD count.
+        count: usize,
+        /// Maximum DTD count for the collection.
+        maximum: usize,
+    },
+    /// A CTA DTD cannot be represented by the EDID DTD fields.
+    CtaDtdInvalid {
+        /// Zero-based DTD index.
+        index: usize,
+        /// Underlying DTD validation error.
+        source: crate::error::DtdError,
+    },
+    /// The DisplayID data-block payload cannot fit in one extension.
+    DisplayIdPayloadTooLong {
+        /// Encoded payload length.
+        length: usize,
+        /// Maximum payload length.
+        maximum: usize,
+    },
+    /// The target block is not a CTA-861 extension.
+    NotCta861,
+    /// The target block is not a DisplayID extension.
+    NotDisplayId,
+}
+
+impl std::fmt::Display for ExtensionWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCtaTag { tag } => {
+                write!(f, "CTA data-block tag {tag} exceeds the three-bit field")
+            }
+            Self::CtaPayloadTooLong { length, maximum } => write!(
+                f,
+                "CTA data-block payload length {length} exceeds the {maximum}-byte maximum"
+            ),
+            Self::CtaDataBlocksTooLong { length, maximum } => write!(
+                f,
+                "CTA data-block collection length {length} exceeds the {maximum}-byte maximum"
+            ),
+            Self::CtaDtdsTooLong { count, maximum } => {
+                write!(
+                    f,
+                    "CTA DTD count {count} exceeds the {maximum}-slot maximum"
+                )
+            }
+            Self::CtaDtdInvalid { index, source } => {
+                write!(f, "CTA DTD {index} is invalid: {source}")
+            }
+            Self::DisplayIdPayloadTooLong { length, maximum } => write!(
+                f,
+                "DisplayID payload length {length} exceeds the {maximum}-byte maximum"
+            ),
+            Self::NotCta861 => f.write_str("block is not a CTA-861 extension"),
+            Self::NotDisplayId => f.write_str("block is not a DisplayID extension"),
+        }
+    }
+}
+
+impl DisplayIdDataBlock {
+    /// Encode this DisplayID data block with its three-byte header.
+    pub fn encode(&self) -> Result<Vec<u8>, ExtensionWriteError> {
+        if self.payload.len() > u8::MAX as usize {
+            return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                length: self.payload.len(),
+                maximum: u8::MAX as usize,
+            });
+        }
+        let mut encoded = Vec::with_capacity(self.payload.len() + 3);
+        encoded.extend_from_slice(&[self.tag, self.revision, self.payload.len() as u8]);
+        encoded.extend_from_slice(&self.payload);
+        Ok(encoded)
+    }
+}
+
+impl std::error::Error for ExtensionWriteError {}
+
 impl CtaDataBlock {
+    /// Encode this block as a CTA data-block header followed by its payload.
+    pub fn encode(&self) -> Result<Vec<u8>, ExtensionWriteError> {
+        const MAX_PAYLOAD_LENGTH: usize = 0x1F;
+
+        if self.tag > 0x07 {
+            return Err(ExtensionWriteError::InvalidCtaTag { tag: self.tag });
+        }
+        if self.payload.len() > MAX_PAYLOAD_LENGTH {
+            return Err(ExtensionWriteError::CtaPayloadTooLong {
+                length: self.payload.len(),
+                maximum: MAX_PAYLOAD_LENGTH,
+            });
+        }
+
+        let mut encoded = Vec::with_capacity(self.payload.len() + 1);
+        encoded.push((self.tag << 5) | self.payload.len() as u8);
+        encoded.extend_from_slice(&self.payload);
+        Ok(encoded)
+    }
+
     /// Decode this data block into a typed read-only view.
     pub fn view(&self) -> Result<CtaDataBlockView, ExtensionError> {
         match self.tag {
@@ -982,6 +1103,130 @@ impl EdidBlock {
             tag => ExtensionKind::Unknown { tag },
         }
     }
+    /// Construct a CTA-861 extension containing data blocks and DTDs.
+    pub fn from_cta_data_blocks_and_timings(
+        revision: u8,
+        blocks: &[CtaDataBlock],
+        timings: &[crate::timing::DetailedTiming],
+    ) -> Result<Self, ExtensionWriteError> {
+        const DATA_BLOCK_OFFSET: usize = 4;
+        const DTD_SIZE: usize = 18;
+
+        let mut collection = Vec::new();
+        for data_block in blocks {
+            collection.extend_from_slice(&data_block.encode()?);
+        }
+        const MAX_COLLECTION_LENGTH: usize = 123;
+        if collection.len() > MAX_COLLECTION_LENGTH {
+            return Err(ExtensionWriteError::CtaDataBlocksTooLong {
+                length: collection.len(),
+                maximum: MAX_COLLECTION_LENGTH,
+            });
+        }
+        let dtd_offset = DATA_BLOCK_OFFSET + collection.len();
+        let maximum = (127usize.saturating_sub(dtd_offset)) / DTD_SIZE;
+        if timings.len() > maximum {
+            return Err(ExtensionWriteError::CtaDtdsTooLong {
+                count: timings.len(),
+                maximum,
+            });
+        }
+
+        let mut block = Self {
+            raw: [0; crate::edid::EDID_BLOCK_SIZE],
+        };
+        block.raw[0] = 0x02;
+        block.raw[1] = revision;
+        block.raw[2] = dtd_offset as u8;
+        block.raw[3] = timings.len() as u8;
+        block.raw[DATA_BLOCK_OFFSET..dtd_offset].copy_from_slice(&collection);
+
+        for (index, timing) in timings.iter().enumerate() {
+            let mut encoded = crate::edid::EdidBlock::new_default();
+            encoded
+                .write_detailed_checked(0, timing)
+                .map_err(|source| ExtensionWriteError::CtaDtdInvalid { index, source })?;
+            let start = dtd_offset + index * DTD_SIZE;
+            block.raw[start..start + DTD_SIZE].copy_from_slice(&encoded.raw[54..54 + DTD_SIZE]);
+        }
+        block.update_checksum();
+        Ok(block)
+    }
+    /// Replace the CTA data-block collection and clear existing CTA DTDs.
+    ///
+    /// The revision is preserved; all derived offsets, padding, native count,
+    /// and checksum are regenerated by the checked constructor.
+    pub fn replace_cta_data_blocks(
+        &mut self,
+        blocks: &[CtaDataBlock],
+    ) -> Result<(), ExtensionWriteError> {
+        if self.raw[0] != 0x02 {
+            return Err(ExtensionWriteError::NotCta861);
+        }
+        let rebuilt = Self::from_cta_data_blocks(self.raw[1], blocks)?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    /// Construct a DisplayID extension containing raw data blocks.
+    pub fn from_display_id_data_blocks(
+        revision: u8,
+        product_type_or_primary_use: u8,
+        extension_count: u8,
+        blocks: &[DisplayIdDataBlock],
+    ) -> Result<Self, ExtensionWriteError> {
+        const DATA_OFFSET: usize = 5;
+        const MAX_PAYLOAD: usize = 121;
+
+        let mut payload = Vec::new();
+        for data_block in blocks {
+            payload.extend_from_slice(&data_block.encode()?);
+        }
+        if payload.len() > MAX_PAYLOAD {
+            return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                length: payload.len(),
+                maximum: MAX_PAYLOAD,
+            });
+        }
+
+        let mut block = Self {
+            raw: [0; crate::edid::EDID_BLOCK_SIZE],
+        };
+        block.raw[0] = 0x70;
+        block.raw[1] = revision;
+        block.raw[2] = payload.len() as u8;
+        block.raw[3] = product_type_or_primary_use;
+        block.raw[4] = extension_count;
+        block.raw[DATA_OFFSET..DATA_OFFSET + payload.len()].copy_from_slice(&payload);
+        let section_checksum = DATA_OFFSET + payload.len();
+        let sum = block.raw[1..section_checksum]
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+        block.raw[section_checksum] = 0u8.wrapping_sub(sum);
+        block.update_checksum();
+        Ok(block)
+    }
+    /// Replace DisplayID data blocks while preserving section header fields.
+    pub fn replace_display_id_data_blocks(
+        &mut self,
+        blocks: &[DisplayIdDataBlock],
+    ) -> Result<(), ExtensionWriteError> {
+        if self.raw[0] != 0x70 {
+            return Err(ExtensionWriteError::NotDisplayId);
+        }
+        let rebuilt =
+            Self::from_display_id_data_blocks(self.raw[1], self.raw[3], self.raw[4], blocks)?;
+        *self = rebuilt;
+        Ok(())
+    }
+
+    /// Construct a CTA-861 extension containing only a data-block collection.
+    pub fn from_cta_data_blocks(
+        revision: u8,
+        blocks: &[CtaDataBlock],
+    ) -> Result<Self, ExtensionWriteError> {
+        Self::from_cta_data_blocks_and_timings(revision, blocks, &[])
+    }
 
     /// Read and validate the DisplayID base-section header.
     pub fn display_id_header(&self) -> Result<DisplayIdHeader, ExtensionError> {
@@ -1163,8 +1408,9 @@ fn parse_cta_data_blocks(
 mod tests {
     use super::{
         CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock,
-        CtaVideoMode, DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
-        DisplayIdHeader, ExtensionError, ExtensionKind,
+        CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
+        DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
+        ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -1815,5 +2061,178 @@ mod tests {
             }
             other => panic!("expected DolbyVision, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn constructs_cta_block_from_data_blocks() {
+        let blocks = [CtaDataBlock {
+            tag: 2,
+            payload: vec![16, 31],
+        }];
+        let block = EdidBlock::from_cta_data_blocks(3, &blocks).unwrap();
+        assert_eq!(block.raw[0], 0x02);
+        assert_eq!(block.raw[1], 3);
+        assert_eq!(block.raw[2], 7);
+        assert_eq!(block.cta_data_blocks().unwrap(), blocks);
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn cta_constructor_zeroes_padding_and_dtd_area() {
+        let block = EdidBlock::from_cta_data_blocks(3, &[]).unwrap();
+        assert_eq!(&block.raw[4..127], &[0; 123]);
+        assert!(block.cta_detailed_timings_flagged().unwrap().is_empty());
+    }
+
+    #[test]
+    fn constructs_cta_block_with_detailed_timings_and_native_count() {
+        let timing = crate::timing::all_presets()[0].clone();
+        let block = EdidBlock::from_cta_data_blocks_and_timings(3, &[], &[timing]).unwrap();
+        assert_eq!(block.raw[2], 4);
+        assert_eq!(block.raw[3] & 0x0F, 1);
+        assert_eq!(block.cta_detailed_timings().unwrap().len(), 1);
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_cta_dtds_without_space() {
+        let timings = (0..7)
+            .map(|_| crate::timing::all_presets()[0].clone())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            EdidBlock::from_cta_data_blocks_and_timings(3, &[], &timings),
+            Err(ExtensionWriteError::CtaDtdsTooLong {
+                count: 7,
+                maximum: 6
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_cta_data_collection_that_cannot_fit() {
+        let blocks = vec![
+            CtaDataBlock {
+                tag: 2,
+                payload: vec![0; 31],
+            };
+            4
+        ];
+        assert!(matches!(
+            EdidBlock::from_cta_data_blocks(3, &blocks),
+            Err(ExtensionWriteError::CtaDataBlocksTooLong {
+                length: 128,
+                maximum: 123
+            })
+        ));
+    }
+
+    #[test]
+    fn replaces_cta_data_blocks_and_recomputes_layout() {
+        let mut block = EdidBlock::from_cta_data_blocks(
+            3,
+            &[CtaDataBlock {
+                tag: 2,
+                payload: vec![16],
+            }],
+        )
+        .unwrap();
+        block
+            .replace_cta_data_blocks(&[CtaDataBlock {
+                tag: 1,
+                payload: vec![0x09, 0x07, 0x07],
+            }])
+            .unwrap();
+        assert_eq!(block.raw[2], 8);
+        assert_eq!(block.cta_data_blocks().unwrap()[0].tag, 1);
+        assert_eq!(block.validate(), Ok(()));
+    }
+    #[test]
+    fn encodes_raw_cta_data_block_header_and_payload() {
+        let block = CtaDataBlock {
+            tag: 2,
+            payload: vec![16, 31],
+        };
+        assert_eq!(block.encode().unwrap(), vec![0x42, 16, 31]);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_raw_cta_data_block() {
+        let invalid_tag = CtaDataBlock {
+            tag: 8,
+            payload: Vec::new(),
+        };
+        assert!(matches!(
+            invalid_tag.encode(),
+            Err(ExtensionWriteError::InvalidCtaTag { tag: 8 })
+        ));
+
+        let oversized = CtaDataBlock {
+            tag: 2,
+            payload: vec![0; 32],
+        };
+        assert!(matches!(
+            oversized.encode(),
+            Err(ExtensionWriteError::CtaPayloadTooLong {
+                length: 32,
+                maximum: 31
+            })
+        ));
+    }
+
+    #[test]
+    fn constructs_display_id_from_data_blocks() {
+        let blocks = [DisplayIdDataBlock {
+            tag: 0x55,
+            revision: 1,
+            payload: vec![0xAA, 0xBB],
+        }];
+        let block = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &blocks).unwrap();
+        assert_eq!(block.raw[0], 0x70);
+        assert_eq!(block.raw[1], 0x20);
+        assert_eq!(block.display_id_data_blocks().unwrap(), blocks);
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_display_id_payload_over_121_bytes() {
+        let blocks = [DisplayIdDataBlock {
+            tag: 1,
+            revision: 0,
+            payload: vec![0; 119],
+        }];
+        assert!(matches!(
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &blocks),
+            Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                length: 122,
+                maximum: 121
+            })
+        ));
+    }
+
+    #[test]
+    fn replaces_display_id_data_blocks_and_preserves_header_fields() {
+        let mut block = EdidBlock::from_display_id_data_blocks(
+            0x20,
+            2,
+            3,
+            &[DisplayIdDataBlock {
+                tag: 0x55,
+                revision: 1,
+                payload: vec![0xAA],
+            }],
+        )
+        .unwrap();
+        block
+            .replace_display_id_data_blocks(&[DisplayIdDataBlock {
+                tag: 0x56,
+                revision: 2,
+                payload: vec![0xBB, 0xCC],
+            }])
+            .unwrap();
+        assert_eq!(block.raw[1], 0x20);
+        assert_eq!(block.raw[3], 2);
+        assert_eq!(block.raw[4], 3);
+        assert_eq!(block.display_id_data_blocks().unwrap()[0].tag, 0x56);
+        assert_eq!(block.validate(), Ok(()));
     }
 }

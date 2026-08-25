@@ -240,6 +240,7 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
         .fold(0u8, |acc, &b| acc.wrapping_add(b));
     edid_1080p[127] = (0u8).wrapping_sub(sum);
     let parsed = Edid::from_bytes(&edid_1080p).expect("valid 1080p EDID must parse");
+    assert_eq!(parsed.to_bytes(), edid_1080p);
     assert_eq!(parsed.extensions.len(), 0);
     assert_eq!(parsed.base.validate(), Ok(()));
     let decoded_timing = parsed.base.read_detailed(0).unwrap();
@@ -266,6 +267,7 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
     multi_edid[255] = (0u8).wrapping_sub(cta_sum);
 
     let parsed_multi = Edid::from_bytes(&multi_edid).expect("multi-block EDID must parse");
+    assert_eq!(parsed_multi.to_bytes(), multi_edid);
     assert_eq!(parsed_multi.extensions.len(), 1);
     assert_eq!(parsed_multi.base.validate(), Ok(()));
     assert_eq!(parsed_multi.extensions[0].validate(), Ok(()));
@@ -313,6 +315,7 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
 
     let parsed_dispid =
         Edid::from_bytes(&displayid_edid).expect("DisplayID multi-block must parse");
+    assert_eq!(parsed_dispid.to_bytes(), displayid_edid);
     assert_eq!(parsed_dispid.extensions.len(), 1);
     assert_eq!(
         parsed_dispid.extensions[0]
@@ -326,6 +329,72 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
         .display_id_data_blocks()
         .unwrap();
     assert_eq!(db.len(), 1);
+}
+
+#[test]
+fn extension_validation_distinguishes_standalone_blocks_from_extension_slots() {
+    use edid_seria::{EdidBlock, EdidError, serialize_timings};
+
+    let extension_like_base = EdidBlock::new_default();
+    assert_eq!(
+        EdidBlock::from_bytes_checked(extension_like_base.as_bytes()),
+        Ok(extension_like_base.clone())
+    );
+    assert_eq!(
+        extension_like_base.validate_extension(),
+        Err(EdidError::InvalidHeader)
+    );
+
+    let mut base = EdidBlock::new_default();
+    base.raw[126] = 1;
+    base.update_checksum();
+    let mut complete = Vec::with_capacity(256);
+    complete.extend_from_slice(base.as_bytes());
+    complete.extend_from_slice(extension_like_base.as_bytes());
+
+    assert_eq!(Edid::from_bytes(&complete), Err(EdidError::InvalidHeader));
+    assert!(matches!(
+        serialize_timings(Some(&complete), &[]),
+        Err(edid_seria::SerializeError::InvalidExistingBlock {
+            index: 1,
+            source: EdidError::InvalidHeader,
+        })
+    ));
+    assert!(matches!(
+        edid_seria::serialize_resolutions_checked(Some(&complete), &[]),
+        Err(edid_seria::SerializeError::InvalidExistingBlock {
+            index: 1,
+            source: EdidError::InvalidHeader,
+        })
+    ));
+}
+
+#[test]
+fn extension_lifecycle_rejects_base_blocks_without_mutation() {
+    use edid_seria::{EdidBlock, EdidError};
+
+    let valid_extension = EdidBlock::from_cta_data_blocks(3, &[]).unwrap();
+    let mut edid = Edid {
+        base: EdidBlock::new_default(),
+        extensions: vec![valid_extension],
+    };
+    edid.base.raw[126] = 1;
+    edid.base.update_checksum();
+    let before = edid.clone();
+    let invalid_extension = EdidBlock::new_default();
+
+    assert_eq!(
+        edid.insert_extension(1, invalid_extension.clone()),
+        Err(EdidError::InvalidHeader)
+    );
+    assert_eq!(edid, before);
+    assert_eq!(
+        edid.replace_extension(0, invalid_extension),
+        Err(EdidError::InvalidHeader)
+    );
+    assert_eq!(edid, before);
+    edid.extensions[0] = EdidBlock::new_default();
+    assert_eq!(edid.validate(), Err(EdidError::InvalidHeader));
 }
 
 #[test]

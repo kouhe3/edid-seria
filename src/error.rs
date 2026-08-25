@@ -31,6 +31,18 @@ pub enum EdidError {
         /// Number of extension blocks supplied.
         actual: usize,
     },
+    /// An extension index is outside the current extension list.
+    ExtensionIndexOutOfRange {
+        /// Requested zero-based extension index.
+        index: usize,
+        /// Current extension count.
+        count: usize,
+    },
+    /// The extension count cannot be represented by the base block byte.
+    TooManyExtensions {
+        /// Requested extension count.
+        count: usize,
+    },
     /// The base block uses an unsupported EDID version.
     UnsupportedVersion {
         /// EDID major version.
@@ -59,13 +71,17 @@ pub enum MetadataError {
         /// Supplied absolute year.
         year: u16,
     },
+    /// Manufacture week uses a reserved EDID encoding.
+    InvalidManufactureWeek {
+        /// Supplied EDID manufacture-week byte.
+        week: u8,
+    },
     /// Gamma is outside the EDID representable range, in hundredths.
     InvalidGamma {
         /// Supplied gamma multiplied by 100.
         value: u16,
     },
 }
-
 impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -79,6 +95,9 @@ impl fmt::Display for MetadataError {
             }
             Self::InvalidManufactureYear { year } => {
                 write!(f, "manufacture year {year} is outside the EDID range")
+            }
+            Self::InvalidManufactureWeek { week } => {
+                write!(f, "manufacture week {week} uses a reserved EDID encoding")
             }
             Self::InvalidGamma { value } => {
                 write!(f, "gamma value {value} is outside the EDID range")
@@ -449,6 +468,13 @@ impl fmt::Display for EdidError {
                 f,
                 "EDID declares {declared} extension blocks but supplied {actual}"
             ),
+            Self::ExtensionIndexOutOfRange { index, count } => write!(
+                f,
+                "extension index {index} is outside the {count}-extension list"
+            ),
+            Self::TooManyExtensions { count } => {
+                write!(f, "EDID contains too many extension blocks: {count}")
+            }
             Self::UnsupportedVersion { major, minor } => {
                 write!(f, "unsupported EDID version {major}.{minor}")
             }
