@@ -1,7 +1,8 @@
 # ADR-001: Serialization scope, flag normalization, and edid-decode alignment
 
 ## Status
-Accepted
+Superseded for extension-writing scope; retained as a historical record of the
+original base-only serializer.
 
 ## Date
 2026-08-14
@@ -16,7 +17,7 @@ against 48,960 real monitor EDIDs and the `edid-decode` reference decoder.
 
 ## Decision
 
-### 1. Base-block DTD rewriting only — no CTA-861 / DisplayID generation
+### 1. Base-block DTD rewriting for the high-level serializer
 
 New timings are written exclusively into the four 18-byte DTD slots of the
 base block; extension blocks are preserved but never extended.
@@ -33,8 +34,8 @@ Alternatives considered:
 Consequence: modes whose computed timing does not fit a DTD (see
 `timing::dtd_fits`) are rejected with `skipped += 1` rather than emitted
 incorrectly. E.g. CVT-RB2 2560×1440@144 has v_front = 89 > 63 and cannot be
-serialized; supporting it would require DisplayID generation, deliberately
-out of scope.
+serialized by this high-level base-block pipeline; supporting it there would
+require DisplayID generation, deliberately out of scope for that pipeline.
 
 ### 2. Flags normalized to digital separate sync on write
 
@@ -77,8 +78,24 @@ APIs reject malformed block sequences, bad checksums, unsupported base-block
 versions, invalid DTD fields, and unavailable slots with structured errors.
 
 The strict parser aggregates the base block and extensions, identifies CTA-861,
-DisplayID, and unknown extension tags, and preserves unknown raw bytes. CTA and
-DisplayID generation remains out of scope.
+DisplayID, and unknown extension tags, and preserves unknown raw bytes. At the
+stage recorded by this ADR, CTA and DisplayID generation remained out of scope
+for the high-level resolution serializer.
+
+## Current extension-writer boundary
+
+This ADR's base-only generation decision is superseded in part by the current
+raw extension-writer APIs. `CtaDataBlock` and `DisplayIdDataBlock` can be
+encoded; CTA extensions can be constructed with data-block collections and
+progressive DTDs, and their data-block collection can be replaced. DisplayID
+extensions can be constructed or have their raw data blocks replaced. These
+writers enforce representable payload and collection limits and regenerate
+derived offsets and checksums.
+
+This does not provide general typed CTA-861 or DisplayID field editing. Typed
+extension views remain primarily inspection-oriented, and unknown or
+vendor-specific fields are not canonicalized. The high-level resolution
+serializer documented by this ADR remains a base-block DTD pipeline.
 
 ## Consequences
 

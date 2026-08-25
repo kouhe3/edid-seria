@@ -25,10 +25,11 @@ CRU-style display override tools.
    EDID 1.4 standard monitor descriptors (name, serial, alphanumeric string, color point, additional standard timings, Established Timings III, CVT 3-byte timing codes, Display Color Management, and extended Range Limits with Secondary GTF & CVT support), with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
-- **Extension writers** — CTA-861 data-block collections and progressive DTDs
-  can be constructed and replaced; DisplayID raw data blocks can be
-  constructed and replaced. Typed extension views remain available for
-  inspection, and unknown payloads are preserved when passed through raw APIs.
+- **Extension writers** — raw CTA-861 extensions can be constructed with
+  data-block collections and progressive DTDs; CTA data-block collections and
+  DisplayID raw data blocks can be constructed or replaced. Typed extension
+  views remain available for inspection, and unknown payloads are preserved
+  when passed through raw APIs.
 - **High-level display inspection** — convenient `Edid` helpers (`monitor_name()`, `serial_number()`, `preferred_timing()`, `all_detailed_timings()`) that aggregate Base and CTA extension descriptors.
 - **Modeline and Hex interoperability** — X11/xrandr Modeline string formatting and
   parsing, and flexible EDID hex string (compact, formatted, C-array) import/export.
@@ -41,35 +42,45 @@ CRU-style display override tools.
 edid-seria = "0.1"
 ```
 
-```rust
+```rust,no_run
+use std::fs;
 use edid_seria::{EdidBlock, ResolutionSpec, TimingKind, serialize_resolutions};
 
-// Read a display's detailed timings.
-let block = EdidBlock::from_bytes(&edid_bytes).unwrap();
-for t in block.detailed_timings() {
-    println!("{}", t.label()); // e.g. "1920x1080 @ 60Hz"
-}
+fn main() -> std::io::Result<()> {
+    // Read a display's detailed timings.
+    let edid_bytes = fs::read("input.bin")?;
+    let block = EdidBlock::from_bytes(&edid_bytes).expect("valid EDID base block");
+    for t in block.detailed_timings() {
+        println!("{}", t.label()); // e.g. "1920x1080 @ 60Hz"
+    }
 
-// Build an EDID override: keep the display's existing EDID, replace the
-// base-block timings with two computed modes.
-let res = serialize_resolutions(
-    Some(&edid_bytes),
-    &[
-        ResolutionSpec { width: 1920, height: 1080, refresh: 60.0, kind: TimingKind::Pc },
-        ResolutionSpec { width: 3840, height: 2160, refresh: 60.0, kind: TimingKind::Hdtv },
-    ],
-);
-assert_eq!(res.skipped, 0); // 0 = every requested mode was written
-fs::write("override.bin", &res.bytes)?;
+    // Build an EDID override: keep the display's existing EDID, replace the
+    // base-block timings with two computed modes.
+    let res = serialize_resolutions(
+        Some(&edid_bytes),
+        &[
+            ResolutionSpec { width: 1920, height: 1080, refresh: 60.0, kind: TimingKind::Pc },
+            ResolutionSpec { width: 3840, height: 2160, refresh: 60.0, kind: TimingKind::Hdtv },
+        ],
+    );
+    assert_eq!(res.skipped, 0); // 0 = every requested mode was written
+    fs::write("override.bin", &res.bytes)
+}
 ```
 
 ## Core-library boundaries
 
 The library is platform-independent. It does not enumerate displays, access the
-Windows registry, request elevation, or apply driver overrides. CTA-861 and
-DisplayID typed field editing remains limited; the current writers operate on
-raw data blocks and DTDs, preserve block order, and do not canonicalize every
-vendor-specific field.
+Windows registry, request elevation, or apply driver overrides. The current
+extension writers are intentionally raw: CTA-861 extensions can be constructed
+with data-block collections and progressive DTDs, and their data-block
+collections can be replaced; DisplayID extensions can be constructed or have
+their raw data blocks replaced. Derived offsets, payload limits, and checksums
+are enforced, but vendor-specific fields are not canonicalized.
+
+Typed CTA-861 and DisplayID views are available for inspection, while typed
+field editing remains limited; the extension writers do not provide general
+typed extension editing.
 
 `serialize_resolutions` retains its compatibility behavior: malformed or
 partial input may fall back or be skipped. New code should use
@@ -104,14 +115,17 @@ Key design decisions are recorded in [docs/decisions](docs/decisions/).
 
 ## Contributing
 
-PRs welcome. CI runs `fmt`, `clippy -D warnings`, tests, rustdoc, package, and
-library checks on Linux, Windows, and macOS; the same gates must pass locally:
+PRs welcome. CI runs formatting, Clippy, tests, rustdoc, and package checks in
+an Ubuntu quality job. It also runs library and integration tests on Ubuntu,
+Windows, and macOS, plus MSRV 1.95 tests on Ubuntu. To reproduce the quality
+job locally:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo package
 ```
 
 The corpus/property smoke tests live in `tests/core_regression.rs`; the
