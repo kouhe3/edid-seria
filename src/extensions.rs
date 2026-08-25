@@ -461,52 +461,56 @@ pub enum DisplayIdDataBlockView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExtensionWriteError {
-    /// CTA data-block tag does not fit its three-bit field.
     InvalidCtaTag {
-        /// Supplied tag value.
         tag: u8,
     },
-    /// CTA data-block payload exceeds its five-bit length field.
     CtaPayloadTooLong {
-        /// Supplied payload length.
         length: usize,
-        /// Maximum representable payload length.
         maximum: usize,
     },
-    /// The complete CTA data-block collection does not fit before byte 127.
-    CtaDataBlocksTooLong {
-        /// Supplied collection length.
-        length: usize,
-        /// Maximum collection length.
-        maximum: usize,
-    },
-    /// The CTA DTD collection exceeds the available 18-byte slots.
-    CtaDtdsTooLong {
-        /// Supplied DTD count.
-        count: usize,
-        /// Maximum DTD count for the collection.
-        maximum: usize,
-    },
-    /// A CTA DTD cannot be represented by the EDID DTD fields.
-    CtaDtdInvalid {
-        /// Zero-based DTD index.
+    InvalidCtaVideoCode {
         index: usize,
-        /// Underlying DTD validation error.
+        vic: u8,
+    },
+    InvalidCtaAudioFormat {
+        index: usize,
+        format: u8,
+    },
+    InvalidCtaAudioChannels {
+        index: usize,
+        channels: u8,
+    },
+    InvalidCtaAudioSampleRates {
+        index: usize,
+        sample_rates: u8,
+    },
+    InvalidCtaField {
+        field: &'static str,
+        value: u8,
+        maximum: u8,
+    },
+    UnsupportedCtaTypedEncoding {
+        kind: &'static str,
+    },
+    CtaDataBlocksTooLong {
+        length: usize,
+        maximum: usize,
+    },
+    CtaDtdsTooLong {
+        count: usize,
+        maximum: usize,
+    },
+    CtaDtdInvalid {
+        index: usize,
         source: crate::error::DtdError,
     },
-    /// The DisplayID data-block payload cannot fit in one extension.
     DisplayIdPayloadTooLong {
-        /// Encoded payload length.
         length: usize,
-        /// Maximum payload length.
         maximum: usize,
     },
-    /// The target block is not a CTA-861 extension.
     NotCta861,
-    /// The target block is not a DisplayID extension.
     NotDisplayId,
 }
-
 impl std::fmt::Display for ExtensionWriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -517,16 +521,44 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "CTA data-block payload length {length} exceeds the {maximum}-byte maximum"
             ),
+            Self::InvalidCtaVideoCode { index, vic } => write!(
+                f,
+                "CTA video code {vic} at index {index} is outside 1..=127"
+            ),
+            Self::InvalidCtaAudioFormat { index, format } => write!(
+                f,
+                "CTA audio format {format} at index {index} is outside 1..=15"
+            ),
+            Self::InvalidCtaAudioChannels { index, channels } => write!(
+                f,
+                "CTA audio channel count {channels} at index {index} is outside 1..=8"
+            ),
+            Self::InvalidCtaAudioSampleRates {
+                index,
+                sample_rates,
+            } => write!(
+                f,
+                "CTA audio sample-rate mask 0x{sample_rates:02X} at index {index} uses a reserved bit"
+            ),
+            Self::InvalidCtaField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "CTA field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::UnsupportedCtaTypedEncoding { kind } => {
+                write!(f, "typed CTA encoding for {kind} is not available")
+            }
             Self::CtaDataBlocksTooLong { length, maximum } => write!(
                 f,
                 "CTA data-block collection length {length} exceeds the {maximum}-byte maximum"
             ),
-            Self::CtaDtdsTooLong { count, maximum } => {
-                write!(
-                    f,
-                    "CTA DTD count {count} exceeds the {maximum}-slot maximum"
-                )
-            }
+            Self::CtaDtdsTooLong { count, maximum } => write!(
+                f,
+                "CTA DTD count {count} exceeds the {maximum}-slot maximum"
+            ),
             Self::CtaDtdInvalid { index, source } => {
                 write!(f, "CTA DTD {index} is invalid: {source}")
             }
@@ -540,6 +572,181 @@ impl std::fmt::Display for ExtensionWriteError {
     }
 }
 
+impl CtaDataBlockView {
+    /// Encode a typed CTA view without discarding fields represented by the view.
+    pub fn to_data_block(&self) -> Result<CtaDataBlock, ExtensionWriteError> {
+        (match self {
+            Self::Video { modes } => {
+                if modes.is_empty() {
+                    return Err(ExtensionWriteError::CtaPayloadTooLong {
+                        length: 0,
+                        maximum: 31,
+                    });
+                }
+                let mut payload = Vec::with_capacity(modes.len());
+                for (index, mode) in modes.iter().enumerate() {
+                    if !(1..=127).contains(&mode.vic) {
+                        return Err(ExtensionWriteError::InvalidCtaVideoCode {
+                            index,
+                            vic: mode.vic,
+                        });
+                    }
+                    payload.push(mode.vic | u8::from(mode.native) << 7);
+                }
+                Ok(CtaDataBlock { tag: 2, payload })
+            }
+            Self::Audio { descriptors } => {
+                if descriptors.is_empty() {
+                    return Err(ExtensionWriteError::CtaPayloadTooLong {
+                        length: 0,
+                        maximum: 31,
+                    });
+                }
+                let mut payload = Vec::with_capacity(descriptors.len() * 3);
+                for (index, descriptor) in descriptors.iter().enumerate() {
+                    if !(1..=15).contains(&descriptor.format) {
+                        return Err(ExtensionWriteError::InvalidCtaAudioFormat {
+                            index,
+                            format: descriptor.format,
+                        });
+                    }
+                    if !(1..=8).contains(&descriptor.channels) {
+                        return Err(ExtensionWriteError::InvalidCtaAudioChannels {
+                            index,
+                            channels: descriptor.channels,
+                        });
+                    }
+                    if descriptor.sample_rates & 0x80 != 0 {
+                        return Err(ExtensionWriteError::InvalidCtaAudioSampleRates {
+                            index,
+                            sample_rates: descriptor.sample_rates,
+                        });
+                    }
+                    payload.extend_from_slice(&[
+                        (descriptor.format << 3) | (descriptor.channels - 1),
+                        descriptor.sample_rates,
+                        descriptor.format_specific,
+                    ]);
+                }
+                Ok(CtaDataBlock { tag: 1, payload })
+            }
+            Self::SpeakerAllocation(speaker) => Ok(CtaDataBlock {
+                tag: 4,
+                payload: speaker.raw_mask.to_vec(),
+            }),
+            Self::Unknown { tag, payload } => Ok(CtaDataBlock {
+                tag: *tag,
+                payload: payload.clone(),
+            }),
+            Self::Extended(CtaExtendedDataBlockView::Unknown {
+                extended_tag,
+                payload,
+            }) => {
+                let mut encoded = Vec::with_capacity(payload.len() + 1);
+                encoded.push(*extended_tag);
+                encoded.extend_from_slice(payload);
+                Ok(CtaDataBlock {
+                    tag: 7,
+                    payload: encoded,
+                })
+            }
+            Self::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw }) => Ok(CtaDataBlock {
+                tag: 7,
+                payload: raw.clone(),
+            }),
+            Self::VendorSpecific(CtaVendorSpecificBlock::Other { oui, payload }) => {
+                let mut encoded = Vec::with_capacity(payload.len() + 3);
+                encoded.extend_from_slice(oui);
+                encoded.extend_from_slice(payload);
+                Ok(CtaDataBlock {
+                    tag: 3,
+                    payload: encoded,
+                })
+            }
+            Self::VendorSpecific(_) => Err(ExtensionWriteError::UnsupportedCtaTypedEncoding {
+                kind: "known vendor-specific block",
+            }),
+            Self::Extended(CtaExtendedDataBlockView::VideoCapability(capability)) => {
+                for (field, value) in [
+                    ("PT", capability.pt_behavior),
+                    ("IT", capability.it_behavior),
+                    ("CE", capability.ce_behavior),
+                ] {
+                    if value > 3 {
+                        return Err(ExtensionWriteError::InvalidCtaField {
+                            field,
+                            value,
+                            maximum: 3,
+                        });
+                    }
+                }
+                let value = u8::from(capability.selectable_quantization_range_rgb) << 7
+                    | u8::from(capability.selectable_quantization_range_ycc) << 6
+                    | capability.pt_behavior << 4
+                    | capability.it_behavior << 2
+                    | capability.ce_behavior;
+                Ok(CtaDataBlock {
+                    tag: 7,
+                    payload: vec![0x00, value],
+                })
+            }
+            Self::Extended(CtaExtendedDataBlockView::Colorimetry(colorimetry)) => {
+                if colorimetry.md_flags > 3 {
+                    return Err(ExtensionWriteError::InvalidCtaField {
+                        field: "MD",
+                        value: colorimetry.md_flags,
+                        maximum: 3,
+                    });
+                }
+                let flags = u8::from(colorimetry.xvycc601)
+                    | u8::from(colorimetry.xvycc709) << 1
+                    | u8::from(colorimetry.sycc601) << 2
+                    | u8::from(colorimetry.adobe_ycc601) << 3
+                    | u8::from(colorimetry.adobe_rgb) << 4
+                    | u8::from(colorimetry.bt2020_cycc) << 5
+                    | u8::from(colorimetry.bt2020_ycc) << 6
+                    | u8::from(colorimetry.bt2020_rgb) << 7;
+                Ok(CtaDataBlock {
+                    tag: 7,
+                    payload: vec![0x05, flags, colorimetry.md_flags],
+                })
+            }
+            Self::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+                eotf_flags,
+                metadata_descriptor_flags,
+                max_luminance,
+                max_frame_average_luminance,
+                min_luminance,
+                raw,
+            }) => {
+                let mut payload = vec![0x06, *eotf_flags, *metadata_descriptor_flags];
+                for value in [max_luminance, max_frame_average_luminance, min_luminance]
+                    .into_iter()
+                    .flatten()
+                {
+                    payload.push(*value);
+                }
+                if raw.len() > payload.len() && raw.first() == Some(&0x06) {
+                    payload.extend_from_slice(&raw[payload.len()..]);
+                }
+                Ok(CtaDataBlock { tag: 7, payload })
+            }
+        })
+        .and_then(validate_typed_cta_data_block)
+    }
+}
+fn validate_typed_cta_data_block(block: CtaDataBlock) -> Result<CtaDataBlock, ExtensionWriteError> {
+    if block.tag > 0x07 {
+        return Err(ExtensionWriteError::InvalidCtaTag { tag: block.tag });
+    }
+    if block.payload.len() > 0x1F {
+        return Err(ExtensionWriteError::CtaPayloadTooLong {
+            length: block.payload.len(),
+            maximum: 0x1F,
+        });
+    }
+    Ok(block)
+}
 impl DisplayIdDataBlock {
     /// Encode this DisplayID data block with its three-byte header.
     pub fn encode(&self) -> Result<Vec<u8>, ExtensionWriteError> {
@@ -1407,7 +1614,8 @@ fn parse_cta_data_blocks(
 #[cfg(test)]
 mod tests {
     use super::{
-        CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock,
+        CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
+        CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
         CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
         DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
         ExtensionWriteError,
@@ -2153,6 +2361,192 @@ mod tests {
             payload: vec![16, 31],
         };
         assert_eq!(block.encode().unwrap(), vec![0x42, 16, 31]);
+    }
+    #[test]
+    fn encodes_lossless_cta_typed_views() {
+        let video = CtaDataBlockView::Video {
+            modes: vec![
+                CtaVideoMode {
+                    vic: 16,
+                    native: true,
+                },
+                CtaVideoMode {
+                    vic: 31,
+                    native: false,
+                },
+            ],
+        };
+        assert_eq!(
+            video.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 2,
+                payload: vec![0x90, 31]
+            }
+        );
+
+        let audio = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 1,
+                channels: 2,
+                sample_rates: 0x07,
+                format_specific: 0x10,
+            }],
+        };
+        assert_eq!(
+            audio.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 1,
+                payload: vec![0x09, 0x07, 0x10]
+            }
+        );
+
+        let unknown = CtaDataBlockView::Unknown {
+            tag: 5,
+            payload: vec![1, 2, 3],
+        };
+        assert_eq!(
+            unknown.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 5,
+                payload: vec![1, 2, 3]
+            }
+        );
+
+        let vendor = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Other {
+            oui: [0xAA, 0xBB, 0xCC],
+            payload: vec![0x11, 0x22],
+        });
+        assert_eq!(
+            vendor.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0xAA, 0xBB, 0xCC, 0x11, 0x22],
+            }
+        );
+
+        let extended = CtaDataBlockView::Extended(CtaExtendedDataBlockView::Unknown {
+            extended_tag: 0x1A,
+            payload: vec![0x01, 0x02],
+        });
+        assert_eq!(
+            extended.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x1A, 0x01, 0x02]
+            }
+        );
+    }
+    #[test]
+    fn encodes_cta_speaker_colorimetry_and_video_capability_views() {
+        let speaker = CtaDataBlockView::SpeakerAllocation(CtaSpeakerAllocation {
+            raw_mask: [0x07, 0x05, 0x01],
+        });
+        assert_eq!(
+            speaker.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 4,
+                payload: vec![0x07, 0x05, 0x01],
+            }
+        );
+
+        let colorimetry =
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Colorimetry(CtaColorimetry {
+                xvycc601: true,
+                xvycc709: false,
+                sycc601: true,
+                adobe_ycc601: false,
+                adobe_rgb: true,
+                bt2020_cycc: false,
+                bt2020_ycc: true,
+                bt2020_rgb: true,
+                md_flags: 2,
+            }));
+        assert_eq!(
+            colorimetry.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x05, 0xD5, 0x02],
+            }
+        );
+
+        let capability = CtaDataBlockView::Extended(CtaExtendedDataBlockView::VideoCapability(
+            CtaVideoCapability {
+                selectable_quantization_range_rgb: true,
+                selectable_quantization_range_ycc: false,
+                pt_behavior: 2,
+                it_behavior: 1,
+                ce_behavior: 3,
+            },
+        ));
+        assert_eq!(
+            capability.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x00, 0xA7],
+            }
+        );
+    }
+    #[test]
+    fn encodes_hdr_static_metadata_and_preserves_extra_raw_bytes() {
+        let hdr = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0x07,
+            metadata_descriptor_flags: 0x01,
+            max_luminance: Some(0x40),
+            max_frame_average_luminance: Some(0x20),
+            min_luminance: Some(0x01),
+            raw: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+        });
+        assert_eq!(
+            hdr.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unrepresentable_cta_typed_view_fields() {
+        assert!(matches!(
+            (CtaDataBlockView::Video {
+                modes: vec![CtaVideoMode {
+                    vic: 128,
+                    native: false
+                }],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaVideoCode { index: 0, vic: 128 })
+        ));
+        assert!(matches!(
+            (CtaDataBlockView::Audio {
+                descriptors: vec![CtaAudioDescriptor {
+                    format: 32,
+                    channels: 2,
+                    sample_rates: 0,
+                    format_specific: 0,
+                }],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioFormat {
+                index: 0,
+                format: 32
+            })
+        ));
+        assert!(matches!(
+            (CtaDataBlockView::Audio {
+                descriptors: vec![CtaAudioDescriptor {
+                    format: 1,
+                    channels: 0,
+                    sample_rates: 0,
+                    format_specific: 0,
+                }],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioChannels {
+                index: 0,
+                channels: 0
+            })
+        ));
     }
 
     #[test]
