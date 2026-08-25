@@ -627,55 +627,57 @@ pub enum CvtAspectRatio {
     /// 15:9 aspect ratio (code 11b).
     Ratio15x9,
 }
-
-/// Preferred vertical refresh rate code for a CVT 3-byte timing code.
+/// Preferred vertical refresh rate code for a CVT 3-byte timing code (Tag 0xF8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CvtPreferredRate {
-    /// 50 Hz vertical rate (code 00b).
-    Hz50,
-    /// 60 Hz vertical rate (code 01b).
-    Hz60,
-    /// 75 Hz vertical rate (code 10b).
-    Hz75,
-    /// 85 Hz vertical rate (code 11b).
-    Hz85,
+    /// 50 Hz vertical rate, standard blanking (code 000b).
+    Hz50Standard,
+    /// 60 Hz vertical rate, standard blanking (code 001b).
+    Hz60Standard,
+    /// 75 Hz vertical rate, standard blanking (code 010b).
+    Hz75Standard,
+    /// 85 Hz vertical rate, standard blanking (code 011b).
+    Hz85Standard,
+    /// 60 Hz vertical rate, reduced blanking (code 100b).
+    Hz60ReducedBlanking,
+    /// Reserved preferred rate code (code 101b..111b).
+    Reserved(u8),
 }
 
-/// Supported vertical refresh rates bitmask for a CVT 3-byte timing code.
+/// Supported vertical refresh rates bitmask for a CVT 3-byte timing code (Tag 0xF8).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub struct CvtSupportedRates {
-    /// Raw byte 2 of the CVT timing code.
+    /// Raw byte 2 supported rate bits 4..=0.
     pub raw: u8,
 }
 
 impl CvtSupportedRates {
-    /// 50 Hz with standard blanking (bit 7).
+    /// 50 Hz with standard blanking (bit 4, mask 0x10).
     #[must_use]
     pub fn supports_50hz_standard(&self) -> bool {
-        self.raw & 0x80 != 0
-    }
-    /// 60 Hz with standard blanking (bit 6).
-    #[must_use]
-    pub fn supports_60hz_standard(&self) -> bool {
-        self.raw & 0x40 != 0
-    }
-    /// 75 Hz with standard blanking (bit 5).
-    #[must_use]
-    pub fn supports_75hz_standard(&self) -> bool {
-        self.raw & 0x20 != 0
-    }
-    /// 85 Hz with standard blanking (bit 4).
-    #[must_use]
-    pub fn supports_85hz_standard(&self) -> bool {
         self.raw & 0x10 != 0
     }
-    /// 60 Hz with reduced blanking (bit 3).
+    /// 60 Hz with standard blanking (bit 3, mask 0x08).
     #[must_use]
-    pub fn supports_60hz_reduced_blanking(&self) -> bool {
+    pub fn supports_60hz_standard(&self) -> bool {
         self.raw & 0x08 != 0
     }
+    /// 75 Hz with standard blanking (bit 2, mask 0x04).
+    #[must_use]
+    pub fn supports_75hz_standard(&self) -> bool {
+        self.raw & 0x04 != 0
+    }
+    /// 85 Hz with standard blanking (bit 1, mask 0x02).
+    #[must_use]
+    pub fn supports_85hz_standard(&self) -> bool {
+        self.raw & 0x02 != 0
+    }
+    /// 60 Hz with reduced blanking (bit 0, mask 0x01).
+    #[must_use]
+    pub fn supports_60hz_reduced_blanking(&self) -> bool {
+        self.raw & 0x01 != 0
+    }
 }
-
 /// One 3-byte CVT timing code entry in an EDID 1.4 Tag 0xF8 descriptor.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Cvt3ByteTimingEntry {
@@ -697,16 +699,15 @@ pub enum Cvt3ByteTimingEntry {
 }
 
 impl Cvt3ByteTimingEntry {
-    /// Decode a 3-byte CVT timing entry.
+    /// Decode a 3-byte CVT timing entry per EDID 1.4 §3.10.3.6.
     #[must_use]
     pub fn decode(bytes: [u8; 3]) -> Self {
         if bytes == [0, 0, 0] {
             return Self::Unused;
         }
         let lines_low = bytes[0] as u16;
-        let aspect_code = (bytes[1] >> 6) & 0x03;
-        let lines_high = (bytes[1] & 0x03) as u16;
-        let rate_code = (bytes[1] >> 2) & 0x03;
+        let lines_high = ((bytes[1] >> 4) & 0x0F) as u16;
+        let aspect_code = (bytes[1] >> 2) & 0x03;
         let addressable_lines = ((lines_low | (lines_high << 8)) + 1) * 2;
 
         let aspect_ratio = match aspect_code {
@@ -715,49 +716,63 @@ impl Cvt3ByteTimingEntry {
             2 => CvtAspectRatio::Ratio16x10,
             _ => CvtAspectRatio::Ratio15x9,
         };
+        let rate_code = (bytes[2] >> 5) & 0x07;
         let preferred_rate = match rate_code {
-            0 => CvtPreferredRate::Hz50,
-            1 => CvtPreferredRate::Hz60,
-            2 => CvtPreferredRate::Hz75,
-            _ => CvtPreferredRate::Hz85,
+            0 => CvtPreferredRate::Hz50Standard,
+            1 => CvtPreferredRate::Hz60Standard,
+            2 => CvtPreferredRate::Hz75Standard,
+            3 => CvtPreferredRate::Hz85Standard,
+            4 => CvtPreferredRate::Hz60ReducedBlanking,
+            code => CvtPreferredRate::Reserved(code),
         };
 
         Self::Active {
             addressable_lines,
             aspect_ratio,
             preferred_rate,
-            supported_rates: CvtSupportedRates { raw: bytes[2] },
+            supported_rates: CvtSupportedRates {
+                raw: bytes[2] & 0x1F,
+            },
         }
     }
 
     /// Encode this CVT 3-byte timing entry into 3 bytes.
-    pub fn encode(&self) -> [u8; 3] {
+    pub fn encode(&self) -> Result<[u8; 3], &'static str> {
         match self {
-            Self::Unused => [0, 0, 0],
-            Self::Reserved(raw) => *raw,
+            Self::Unused => Ok([0, 0, 0]),
+            Self::Reserved(raw) => Ok(*raw),
             Self::Active {
                 addressable_lines,
                 aspect_ratio,
                 preferred_rate,
                 supported_rates,
             } => {
+                if *addressable_lines == 0
+                    || *addressable_lines > 8192
+                    || addressable_lines % 2 != 0
+                {
+                    return Err("addressable lines must be non-zero even number <= 8192");
+                }
                 let encoded_lines = (addressable_lines / 2).saturating_sub(1);
                 let lines_low = (encoded_lines & 0xFF) as u8;
-                let lines_high = ((encoded_lines >> 8) & 0x03) as u8;
+                let lines_high = ((encoded_lines >> 8) & 0x0F) as u8;
                 let aspect_code = match aspect_ratio {
                     CvtAspectRatio::Ratio4x3 => 0,
                     CvtAspectRatio::Ratio16x9 => 1,
                     CvtAspectRatio::Ratio16x10 => 2,
                     CvtAspectRatio::Ratio15x9 => 3,
                 };
-                let rate_code = match preferred_rate {
-                    CvtPreferredRate::Hz50 => 0,
-                    CvtPreferredRate::Hz60 => 1,
-                    CvtPreferredRate::Hz75 => 2,
-                    CvtPreferredRate::Hz85 => 3,
+                let preferred_code = match preferred_rate {
+                    CvtPreferredRate::Hz50Standard => 0,
+                    CvtPreferredRate::Hz60Standard => 1,
+                    CvtPreferredRate::Hz75Standard => 2,
+                    CvtPreferredRate::Hz85Standard => 3,
+                    CvtPreferredRate::Hz60ReducedBlanking => 4,
+                    CvtPreferredRate::Reserved(code) => code & 0x07,
                 };
-                let byte1 = (aspect_code << 6) | (rate_code << 2) | lines_high;
-                [lines_low, byte1, supported_rates.raw]
+                let byte1 = (lines_high << 4) | (aspect_code << 2);
+                let byte2 = (preferred_code << 5) | (supported_rates.raw & 0x1F);
+                Ok([lines_low, byte1, byte2])
             }
         }
     }
@@ -782,16 +797,18 @@ pub struct ColorManagementDescriptor {
     pub blue_a2: u16,
 }
 
-/// Secondary GTF curve parameters in a Range Limits descriptor (Tag 0xFD).
+/// Secondary GTF curve parameters in a Range Limits descriptor (Tag 0xFD, EDID 1.4 §3.10.3.3.1).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SecondaryGtfParameters {
-    /// Start break frequency C in kHz (encoded as C / 2).
-    pub start_frequency_c_khz: u8,
-    /// Curve slope M in kHz / % (16-bit little-endian).
+    /// Start break frequency in kHz (must be even, encoded as F_start / 2 in 2 kHz units).
+    pub start_horizontal_frequency_khz: u16,
+    /// C parameter multiplied by 2 (e.g. 80 for C = 40.0, stored in 0.5% units).
+    pub parameter_c: u8,
+    /// M parameter slope in kHz / % (16-bit little-endian, e.g. 600).
     pub slope_m: u16,
-    /// Curve offset K (0..255).
+    /// K parameter offset (0..=255, e.g. 128).
     pub offset_k: u8,
-    /// Curve scaling factor J (encoded as J / 2).
+    /// J parameter scaling factor multiplied by 2 (e.g. 40 for J = 20.0, stored in 0.5% units).
     pub scaling_j: u8,
 }
 
@@ -910,6 +927,12 @@ impl MonitorDescriptor {
                 Ok((0xFA, payload))
             }
             Self::EstablishedTimings3(timings) => {
+                if timings.revision != 0x0A {
+                    return Err(DescriptorError::InvalidRevision {
+                        tag: 0xF7,
+                        revision: timings.revision,
+                    });
+                }
                 let mut payload = [0u8; TEXT_PAYLOAD_LEN];
                 payload[0] = timings.revision;
                 payload[1..7].copy_from_slice(&timings.raw);
@@ -920,11 +943,20 @@ impl MonitorDescriptor {
                 payload[0] = 0x01; // Revision 1
                 for (i, timing) in timings.iter().enumerate() {
                     let off = 1 + i * 3;
-                    payload[off..off + 3].copy_from_slice(&timing.encode());
+                    let encoded = timing
+                        .encode()
+                        .map_err(|reason| DescriptorError::InvalidCvtTiming { slot: i, reason })?;
+                    payload[off..off + 3].copy_from_slice(&encoded);
                 }
                 Ok((0xF8, payload))
             }
             Self::ColorManagement(dcm) => {
+                if dcm.revision != 0x03 {
+                    return Err(DescriptorError::InvalidRevision {
+                        tag: 0xF9,
+                        revision: dcm.revision,
+                    });
+                }
                 let mut payload = [0u8; TEXT_PAYLOAD_LEN];
                 payload[0] = dcm.revision;
                 payload[1..3].copy_from_slice(&dcm.red_a3.to_le_bytes());
@@ -963,15 +995,26 @@ impl MonitorDescriptor {
                         payload[6..13].copy_from_slice(&[0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20]);
                     }
                     RangeLimitsExtension::SecondaryGtf(gtf) => {
+                        if gtf.start_horizontal_frequency_khz > 510
+                            || gtf.start_horizontal_frequency_khz % 2 != 0
+                        {
+                            return Err(DescriptorError::InvalidRangeExtension);
+                        }
                         payload[5] = 0x02;
                         payload[6] = 0x00;
-                        payload[7] = gtf.start_frequency_c_khz;
-                        payload[8..10].copy_from_slice(&gtf.slope_m.to_le_bytes());
-                        payload[10] = gtf.offset_k;
-                        payload[11] = gtf.scaling_j;
-                        payload[12] = 0x0A;
+                        payload[7] = (gtf.start_horizontal_frequency_khz / 2) as u8;
+                        payload[8] = gtf.parameter_c;
+                        payload[9..11].copy_from_slice(&gtf.slope_m.to_le_bytes());
+                        payload[11] = gtf.offset_k;
+                        payload[12] = gtf.scaling_j;
                     }
                     RangeLimitsExtension::Cvt(cvt) => {
+                        if cvt.max_active_pixels > 8184
+                            || cvt.max_active_pixels % 8 != 0
+                            || cvt.max_pixel_clock_precision > 63
+                        {
+                            return Err(DescriptorError::InvalidRangeExtension);
+                        }
                         payload[5] = 0x04;
                         payload[6] = cvt.revision;
                         let max_pix_units = cvt.max_active_pixels / 8;
@@ -1205,7 +1248,7 @@ impl EdidBlock {
                 }
                 MonitorDescriptor::AdditionalStandardTimings(timings)
             }
-            0xF7 => {
+            0xF7 if payload[0] == 0x0A => {
                 let raw: [u8; 6] = payload[1..7]
                     .try_into()
                     .expect("established timings 3 is 6 bytes");
@@ -1214,31 +1257,34 @@ impl EdidBlock {
                     raw,
                 })
             }
-            0xF8 => {
+            0xF8 if payload[0] == 0x01 => {
                 let slot0 = Cvt3ByteTimingEntry::decode([payload[1], payload[2], payload[3]]);
                 let slot1 = Cvt3ByteTimingEntry::decode([payload[4], payload[5], payload[6]]);
                 let slot2 = Cvt3ByteTimingEntry::decode([payload[7], payload[8], payload[9]]);
                 let slot3 = Cvt3ByteTimingEntry::decode([payload[10], payload[11], payload[12]]);
                 MonitorDescriptor::Cvt3ByteTimings([slot0, slot1, slot2, slot3])
             }
-            0xF9 => MonitorDescriptor::ColorManagement(ColorManagementDescriptor {
-                revision: payload[0],
-                red_a3: u16::from_le_bytes([payload[1], payload[2]]),
-                red_a2: u16::from_le_bytes([payload[3], payload[4]]),
-                green_a3: u16::from_le_bytes([payload[5], payload[6]]),
-                green_a2: u16::from_le_bytes([payload[7], payload[8]]),
-                blue_a3: u16::from_le_bytes([payload[9], payload[10]]),
-                blue_a2: u16::from_le_bytes([payload[11], payload[12]]),
-            }),
+            0xF9 if payload[0] == 0x03 => {
+                MonitorDescriptor::ColorManagement(ColorManagementDescriptor {
+                    revision: payload[0],
+                    red_a3: u16::from_le_bytes([payload[1], payload[2]]),
+                    red_a2: u16::from_le_bytes([payload[3], payload[4]]),
+                    green_a3: u16::from_le_bytes([payload[5], payload[6]]),
+                    green_a2: u16::from_le_bytes([payload[7], payload[8]]),
+                    blue_a3: u16::from_le_bytes([payload[9], payload[10]]),
+                    blue_a2: u16::from_le_bytes([payload[11], payload[12]]),
+                })
+            }
             0xFD => {
                 let definition_code = payload[5];
                 let extension = match definition_code {
                     0x00 | 0x01 => RangeLimitsExtension::Standard,
                     0x02 => RangeLimitsExtension::SecondaryGtf(SecondaryGtfParameters {
-                        start_frequency_c_khz: payload[7],
-                        slope_m: u16::from_le_bytes([payload[8], payload[9]]),
-                        offset_k: payload[10],
-                        scaling_j: payload[11],
+                        start_horizontal_frequency_khz: (payload[7] as u16) * 2,
+                        parameter_c: payload[8],
+                        slope_m: u16::from_le_bytes([payload[9], payload[10]]),
+                        offset_k: payload[11],
+                        scaling_j: payload[12],
                     }),
                     0x04 => RangeLimitsExtension::Cvt(CvtRangeSupport {
                         revision: payload[6],
@@ -1697,14 +1743,14 @@ mod tests {
         let cvt1 = Cvt3ByteTimingEntry::Active {
             addressable_lines: 1080,
             aspect_ratio: CvtAspectRatio::Ratio16x9,
-            preferred_rate: CvtPreferredRate::Hz60,
-            supported_rates: CvtSupportedRates { raw: 0x48 }, // 60Hz standard and 60Hz reduced blanking
+            preferred_rate: CvtPreferredRate::Hz60Standard,
+            supported_rates: CvtSupportedRates { raw: 0x09 }, // 60Hz standard (bit 3) & 60Hz RB (bit 0)
         };
         let cvt2 = Cvt3ByteTimingEntry::Active {
             addressable_lines: 900,
             aspect_ratio: CvtAspectRatio::Ratio16x10,
-            preferred_rate: CvtPreferredRate::Hz75,
-            supported_rates: CvtSupportedRates { raw: 0x20 }, // 75Hz standard
+            preferred_rate: CvtPreferredRate::Hz75Standard,
+            supported_rates: CvtSupportedRates { raw: 0x04 }, // 75Hz standard (bit 2)
         };
         let descriptor = MonitorDescriptor::Cvt3ByteTimings([
             cvt1,
@@ -1728,7 +1774,7 @@ mod tests {
             {
                 assert_eq!(addressable_lines, 1080);
                 assert_eq!(aspect_ratio, CvtAspectRatio::Ratio16x9);
-                assert_eq!(preferred_rate, CvtPreferredRate::Hz60);
+                assert_eq!(preferred_rate, CvtPreferredRate::Hz60Standard);
                 assert!(supported_rates.supports_60hz_standard());
                 assert!(supported_rates.supports_60hz_reduced_blanking());
                 assert!(!supported_rates.supports_50hz_standard());
@@ -1736,6 +1782,33 @@ mod tests {
                 panic!("expected active CVT slot 0");
             }
         }
+    }
+
+    #[test]
+    fn cvt_3byte_timing_edid_decode_vector() {
+        // Verified against edid-decode: 1080 lines (1080/2 - 1 = 539 = 0x21B), 16:9 (code 01b = 0x04),
+        // preferred 60Hz standard (code 001b = 0x20), supported 60Hz std & 60Hz RB (0x08 | 0x01 = 0x09).
+        // Byte 0 = 0x1B, Byte 1 = (0x02 << 4) | (0x01 << 2) = 0x24, Byte 2 = 0x20 | 0x09 = 0x29
+        let bytes = [0x1B, 0x24, 0x29];
+        let entry = Cvt3ByteTimingEntry::decode(bytes);
+        if let Cvt3ByteTimingEntry::Active {
+            addressable_lines,
+            aspect_ratio,
+            preferred_rate,
+            supported_rates,
+        } = entry
+        {
+            assert_eq!(addressable_lines, 1080);
+            assert_eq!(aspect_ratio, CvtAspectRatio::Ratio16x9);
+            assert_eq!(preferred_rate, CvtPreferredRate::Hz60Standard);
+            assert!(supported_rates.supports_60hz_standard());
+            assert!(supported_rates.supports_60hz_reduced_blanking());
+            assert!(!supported_rates.supports_50hz_standard());
+            assert!(!supported_rates.supports_75hz_standard());
+        } else {
+            panic!("expected active CVT timing");
+        }
+        assert_eq!(entry.encode().unwrap(), bytes);
     }
 
     #[test]
@@ -1760,7 +1833,7 @@ mod tests {
     fn range_limits_extensions_secondary_gtf_and_cvt_roundtrip() {
         let mut block = EdidBlock::new_default();
 
-        // 1. Secondary GTF curve
+        // 1. Secondary GTF curve with start_horizontal_frequency_khz, parameter_c, slope_m, offset_k, scaling_j
         let gtf_range = MonitorDescriptor::RangeLimits {
             min_vertical_hz: 50,
             max_vertical_hz: 120,
@@ -1768,10 +1841,11 @@ mod tests {
             max_horizontal_khz: 135,
             max_pixel_clock_mhz: 300,
             extension: RangeLimitsExtension::SecondaryGtf(SecondaryGtfParameters {
-                start_frequency_c_khz: 80,
+                start_horizontal_frequency_khz: 80,
+                parameter_c: 80, // C = 40%
                 slope_m: 600,
                 offset_k: 40,
-                scaling_j: 20,
+                scaling_j: 20, // J = 10%
             }),
         };
         block.set_monitor_descriptor(1, &gtf_range).unwrap();
@@ -1798,5 +1872,83 @@ mod tests {
         block.set_monitor_descriptor(2, &cvt_range).unwrap();
         assert_eq!(block.monitor_descriptor(2).unwrap(), Some(cvt_range));
         assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn descriptor_validation_and_revisions() {
+        let mut block = EdidBlock::new_default();
+
+        // Invalid revision for Established Timings III (must be 0x0A)
+        let invalid_et3 = MonitorDescriptor::EstablishedTimings3(EstablishedTimings3 {
+            revision: 0x09,
+            raw: [0; 6],
+        });
+        assert!(matches!(
+            block.set_monitor_descriptor(0, &invalid_et3),
+            Err(DescriptorError::InvalidRevision {
+                tag: 0xF7,
+                revision: 0x09
+            })
+        ));
+
+        // Invalid revision for DCM (must be 0x03)
+        let invalid_dcm = MonitorDescriptor::ColorManagement(ColorManagementDescriptor {
+            revision: 0x01,
+            red_a3: 0,
+            red_a2: 0,
+            green_a3: 0,
+            green_a2: 0,
+            blue_a3: 0,
+            blue_a2: 0,
+        });
+        assert!(matches!(
+            block.set_monitor_descriptor(0, &invalid_dcm),
+            Err(DescriptorError::InvalidRevision {
+                tag: 0xF9,
+                revision: 0x01
+            })
+        ));
+
+        // CVT Range Limits unrepresentable max_active_pixels (not multiple of 8 or > 8184)
+        let invalid_cvt_pixels = MonitorDescriptor::RangeLimits {
+            min_vertical_hz: 48,
+            max_vertical_hz: 144,
+            min_horizontal_khz: 30,
+            max_horizontal_khz: 200,
+            max_pixel_clock_mhz: 500,
+            extension: RangeLimitsExtension::Cvt(CvtRangeSupport {
+                revision: 0x11,
+                max_pixel_clock_precision: 0,
+                max_active_pixels: 8193,
+                supported_aspect_ratios: 0,
+                preferred_aspect_ratio_and_flags: 0,
+                scaling_support: 0,
+                preferred_vertical_rate_hz: 60,
+            }),
+        };
+        assert_eq!(
+            block.set_monitor_descriptor(0, &invalid_cvt_pixels),
+            Err(DescriptorError::InvalidRangeExtension)
+        );
+
+        // Secondary GTF unrepresentable start frequency (must be even <= 510)
+        let invalid_gtf = MonitorDescriptor::RangeLimits {
+            min_vertical_hz: 48,
+            max_vertical_hz: 144,
+            min_horizontal_khz: 30,
+            max_horizontal_khz: 200,
+            max_pixel_clock_mhz: 500,
+            extension: RangeLimitsExtension::SecondaryGtf(SecondaryGtfParameters {
+                start_horizontal_frequency_khz: 511, // Odd
+                parameter_c: 80,
+                slope_m: 600,
+                offset_k: 40,
+                scaling_j: 20,
+            }),
+        };
+        assert_eq!(
+            block.set_monitor_descriptor(0, &invalid_gtf),
+            Err(DescriptorError::InvalidRangeExtension)
+        );
     }
 }

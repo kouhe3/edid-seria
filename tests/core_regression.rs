@@ -435,8 +435,8 @@ fn dtd_and_metadata_property_roundtrips() {
         Cvt3ByteTimingEntry::Active {
             addressable_lines: 1200,
             aspect_ratio: CvtAspectRatio::Ratio16x10,
-            preferred_rate: CvtPreferredRate::Hz60,
-            supported_rates: CvtSupportedRates { raw: 0x48 },
+            preferred_rate: CvtPreferredRate::Hz60Standard,
+            supported_rates: CvtSupportedRates { raw: 0x09 },
         },
         Cvt3ByteTimingEntry::Unused,
         Cvt3ByteTimingEntry::Unused,
@@ -464,7 +464,8 @@ fn dtd_and_metadata_property_roundtrips() {
         max_horizontal_khz: 135,
         max_pixel_clock_mhz: 300,
         extension: RangeLimitsExtension::SecondaryGtf(SecondaryGtfParameters {
-            start_frequency_c_khz: 80,
+            start_horizontal_frequency_khz: 80,
+            parameter_c: 80,
             slope_m: 600,
             offset_k: 40,
             scaling_j: 20,
