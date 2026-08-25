@@ -503,6 +503,8 @@ pub enum ExtensionWriteError {
     },
     /// The target block is not a CTA-861 extension.
     NotCta861,
+    /// The target block is not a DisplayID extension.
+    NotDisplayId,
 }
 
 impl std::fmt::Display for ExtensionWriteError {
@@ -533,6 +535,7 @@ impl std::fmt::Display for ExtensionWriteError {
                 "DisplayID payload length {length} exceeds the {maximum}-byte maximum"
             ),
             Self::NotCta861 => f.write_str("block is not a CTA-861 extension"),
+            Self::NotDisplayId => f.write_str("block is not a DisplayID extension"),
         }
     }
 }
@@ -1202,6 +1205,19 @@ impl EdidBlock {
         block.raw[section_checksum] = 0u8.wrapping_sub(sum);
         block.update_checksum();
         Ok(block)
+    }
+    /// Replace DisplayID data blocks while preserving section header fields.
+    pub fn replace_display_id_data_blocks(
+        &mut self,
+        blocks: &[DisplayIdDataBlock],
+    ) -> Result<(), ExtensionWriteError> {
+        if self.raw[0] != 0x70 {
+            return Err(ExtensionWriteError::NotDisplayId);
+        }
+        let rebuilt =
+            Self::from_display_id_data_blocks(self.raw[1], self.raw[3], self.raw[4], blocks)?;
+        *self = rebuilt;
+        Ok(())
     }
 
     /// Construct a CTA-861 extension containing only a data-block collection.
@@ -2191,5 +2207,32 @@ mod tests {
                 maximum: 121
             })
         ));
+    }
+
+    #[test]
+    fn replaces_display_id_data_blocks_and_preserves_header_fields() {
+        let mut block = EdidBlock::from_display_id_data_blocks(
+            0x20,
+            2,
+            3,
+            &[DisplayIdDataBlock {
+                tag: 0x55,
+                revision: 1,
+                payload: vec![0xAA],
+            }],
+        )
+        .unwrap();
+        block
+            .replace_display_id_data_blocks(&[DisplayIdDataBlock {
+                tag: 0x56,
+                revision: 2,
+                payload: vec![0xBB, 0xCC],
+            }])
+            .unwrap();
+        assert_eq!(block.raw[1], 0x20);
+        assert_eq!(block.raw[3], 2);
+        assert_eq!(block.raw[4], 3);
+        assert_eq!(block.display_id_data_blocks().unwrap()[0].tag, 0x56);
+        assert_eq!(block.validate(), Ok(()));
     }
 }
