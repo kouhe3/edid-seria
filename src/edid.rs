@@ -554,7 +554,7 @@ impl Edid {
         }
         Ok(())
     }
-    /// Insert an extension at `index`, updating the base extension count.
+    /// Insert a validated extension at `index`, updating the base extension count.
     pub fn insert_extension(
         &mut self,
         index: usize,
@@ -566,6 +566,7 @@ impl Edid {
                 count: self.extensions.len(),
             });
         }
+        extension.validate()?;
         if self.extensions.len() >= u8::MAX as usize {
             return Err(EdidError::TooManyExtensions {
                 count: self.extensions.len() + 1,
@@ -577,12 +578,13 @@ impl Edid {
         Ok(())
     }
 
-    /// Replace an extension at `index`, preserving extension ordering.
+    /// Replace a validated extension at `index`, preserving extension ordering.
     pub fn replace_extension(
         &mut self,
         index: usize,
         extension: EdidBlock,
     ) -> Result<(), EdidError> {
+        extension.validate()?;
         let Some(target) = self.extensions.get_mut(index) else {
             return Err(EdidError::ExtensionIndexOutOfRange {
                 index,
@@ -1389,5 +1391,21 @@ mod tests {
         assert!(edid.extensions.is_empty());
         assert_eq!(edid.base.raw[126], 0);
         assert!(edid.to_bytes_checked().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_extensions_without_mutation() {
+        let mut edid = Edid {
+            base: EdidBlock::new_default(),
+            extensions: Vec::new(),
+        };
+        let before = edid.clone();
+        let mut invalid = EdidBlock::new_default();
+        invalid.raw[0] = 0x02;
+        assert!(matches!(
+            edid.insert_extension(0, invalid),
+            Err(EdidError::InvalidChecksum { .. })
+        ));
+        assert_eq!(edid, before);
     }
 }

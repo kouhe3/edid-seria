@@ -14,10 +14,10 @@ CRU-style display override tools.
   (validated field-by-field against the `cvt12.c` reference implementation).
  - **Preset tables** — PC (VESA), common wide-screen, and HDTV (CEA-861)
    timings; the HDTV table covers common modes, not every CEA VIC.
-- **Safe serialization** — rewrites the base block's DTD slots while
-  preserving monitor descriptors (name, serial, range limits) and extension
-  blocks; rejects timings that cannot be represented in a DTD instead of
-  silently truncating them.
+ - **Safe serialization** — rewrites Base Block DTD slots while preserving
+   monitor descriptors and extension blocks; also provides checked
+   construction and mutation for raw CTA-861 and DisplayID data blocks,
+   including automatic offsets, payload limits, and checksums.
  - **Strict parsing** — validated complete EDID sequences with base-header,
    checksum, version, extension-count, and structured error reporting.
  - **Metadata and descriptors** — typed base-block identity, chromaticity
@@ -25,7 +25,10 @@ CRU-style display override tools.
    EDID 1.4 standard monitor descriptors (name, serial, alphanumeric string, color point, additional standard timings, Established Timings III, CVT 3-byte timing codes, Display Color Management, and extended Range Limits with Secondary GTF & CVT support), with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
-- **Extension views** — typed read-only CTA-861 views (header/capabilities, video, audio, speaker allocation, HDMI 1.4b/2.0+, AMD FreeSync, Dolby Vision VSDBs, colorimetry, video capability, HDR static metadata, Adaptive-Sync, and CTA DTD iteration), DisplayID headers, Product Identification, Display Parameters, Type I/Type VII Detailed Timing, embedded CTA, and raw unknown-block views. Extension generation/reordering remains out of scope.
+- **Extension writers** — CTA-861 data-block collections and progressive DTDs
+  can be constructed and replaced; DisplayID raw data blocks can be
+  constructed and replaced. Typed extension views remain available for
+  inspection, and unknown payloads are preserved when passed through raw APIs.
 - **High-level display inspection** — convenient `Edid` helpers (`monitor_name()`, `serial_number()`, `preferred_timing()`, `all_detailed_timings()`) that aggregate Base and CTA extension descriptors.
 - **Modeline and Hex interoperability** — X11/xrandr Modeline string formatting and
   parsing, and flexible EDID hex string (compact, formatted, C-array) import/export.
@@ -64,8 +67,9 @@ fs::write("override.bin", &res.bytes)?;
 
 The library is platform-independent. It does not enumerate displays, access the
 Windows registry, request elevation, or apply driver overrides. CTA-861 and
-DisplayID blocks are currently inspected read-only; their data is preserved but
-not generated or rearranged.
+DisplayID typed field editing remains limited; the current writers operate on
+raw data blocks and DTDs, preserve block order, and do not canonicalize every
+vendor-specific field.
 
 `serialize_resolutions` retains its compatibility behavior: malformed or
 partial input may fall back or be skipped. New code should use

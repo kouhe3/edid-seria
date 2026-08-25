@@ -1,6 +1,7 @@
 #![no_main]
-
-use edid_seria::{Edid, EdidBlock, serialize_resolutions};
+use edid_seria::{
+    CtaDataBlock, DisplayIdDataBlock, Edid, EdidBlock, serialize_resolutions,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
