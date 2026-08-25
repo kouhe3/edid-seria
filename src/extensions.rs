@@ -550,11 +550,6 @@ pub enum ExtensionWriteError {
         field: &'static str,
     },
     /// A typed CTA variant does not yet expose enough fields for safe encoding.
-    UnsupportedCtaTypedEncoding {
-        /// Variant name.
-        kind: &'static str,
-    },
-    /// The complete CTA data-block collection does not fit before byte 127.
     CtaDataBlocksTooLong {
         /// Supplied collection length.
         length: usize,
@@ -657,9 +652,6 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "CTA field {field} value {value} exceeds maximum {maximum}"
             ),
-            Self::UnsupportedCtaTypedEncoding { kind } => {
-                write!(f, "typed CTA encoding for {kind} is not available")
-            }
             Self::CtaDataBlocksTooLong { length, maximum } => write!(
                 f,
                 "CTA data-block collection length {length} exceeds the {maximum}-byte maximum"
