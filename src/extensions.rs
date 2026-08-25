@@ -2,6 +2,13 @@
 
 use crate::edid::EdidBlock;
 
+mod cta;
+
+pub use cta::{
+    CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
+    CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
+};
+
 /// Recognized kind of an EDID extension block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtensionKind {
@@ -49,290 +56,6 @@ impl ExtensionKind {
             _ => None,
         }
     }
-}
-
-/// Parsed CTA-861 extension block header and capability flags (Bytes 1-3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CtaHeader {
-    /// CTA-861 extension revision byte (typically 3).
-    pub revision: u8,
-    /// Byte offset where 18-byte Detailed Timing Descriptors start, or 0 if no DTDs.
-    pub dtd_offset: u8,
-    /// Total number of Native DTDs in this block (from byte 3 bits 0..3).
-    pub native_dtd_count: u8,
-    /// IT video formats are underscanned by default (byte 3 bit 7).
-    pub underscan: bool,
-    /// Basic Audio is supported (byte 3 bit 6).
-    pub basic_audio: bool,
-    /// YCbCr 4:4:4 is supported (byte 3 bit 5).
-    pub ycbcr_444: bool,
-    /// YCbCr 4:2:2 is supported (byte 3 bit 4).
-    pub ycbcr_422: bool,
-}
-
-/// A CTA Speaker Allocation Data Block (Tag 4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CtaSpeakerAllocation {
-    /// Raw 3-byte speaker allocation payload bitmask.
-    pub raw_mask: [u8; 3],
-}
-
-impl CtaSpeakerAllocation {
-    /// Front Left / Front Right (FL/FR, byte 0 bit 0).
-    #[must_use]
-    pub const fn front_left_right(self) -> bool {
-        self.raw_mask[0] & 0x01 != 0
-    }
-
-    /// Low Frequency Effects / Subwoofer (LFE, byte 0 bit 1).
-    #[must_use]
-    pub const fn lfe(self) -> bool {
-        self.raw_mask[0] & 0x02 != 0
-    }
-
-    /// Front Center (FC, byte 0 bit 2).
-    #[must_use]
-    pub const fn front_center(self) -> bool {
-        self.raw_mask[0] & 0x04 != 0
-    }
-
-    /// Rear Left / Rear Right (RL/RR, byte 0 bit 3).
-    #[must_use]
-    pub const fn rear_left_right(self) -> bool {
-        self.raw_mask[0] & 0x08 != 0
-    }
-
-    /// Rear Center (RC, byte 0 bit 4).
-    #[must_use]
-    pub const fn rear_center(self) -> bool {
-        self.raw_mask[0] & 0x10 != 0
-    }
-
-    /// Front Left Center / Front Right Center (FLC/FRC, byte 0 bit 5).
-    #[must_use]
-    pub const fn front_left_right_center(self) -> bool {
-        self.raw_mask[0] & 0x20 != 0
-    }
-
-    /// Rear Left Center / Rear Right Center (RLC/RRC, byte 0 bit 6).
-    #[must_use]
-    pub const fn rear_left_right_center(self) -> bool {
-        self.raw_mask[0] & 0x40 != 0
-    }
-
-    /// Front Left Wide / Front Right Wide (FLW/FRW, byte 1 bit 0).
-    #[must_use]
-    pub const fn front_left_right_wide(self) -> bool {
-        self.raw_mask[1] & 0x01 != 0
-    }
-
-    /// Front Left High / Front Right High (FLH/FRH, byte 1 bit 1).
-    #[must_use]
-    pub const fn front_left_right_high(self) -> bool {
-        self.raw_mask[1] & 0x02 != 0
-    }
-
-    /// Top Center (TC, byte 1 bit 2).
-    #[must_use]
-    pub const fn top_center(self) -> bool {
-        self.raw_mask[1] & 0x04 != 0
-    }
-
-    /// Front Center High (FCH, byte 1 bit 3).
-    #[must_use]
-    pub const fn front_center_high(self) -> bool {
-        self.raw_mask[1] & 0x08 != 0
-    }
-}
-
-/// A CTA Colorimetry Data Block (Extended Tag 0x05).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CtaColorimetry {
-    /// xvYCC601 color space support (byte 1 bit 0).
-    pub xvycc601: bool,
-    /// xvYCC709 color space support (byte 1 bit 1).
-    pub xvycc709: bool,
-    /// sYCC601 color space support (byte 1 bit 2).
-    pub sycc601: bool,
-    /// AdobeYCC601 color space support (byte 1 bit 3).
-    pub adobe_ycc601: bool,
-    /// AdobeRGB color space support (byte 1 bit 4).
-    pub adobe_rgb: bool,
-    /// BT2020CYCC color space support (byte 1 bit 5).
-    pub bt2020_cycc: bool,
-    /// BT2020YCC color space support (byte 1 bit 6).
-    pub bt2020_ycc: bool,
-    /// BT2020RGB color space support (byte 1 bit 7).
-    pub bt2020_rgb: bool,
-    /// Gamut boundary metadata profile support flags (byte 2 bits 0..1).
-    pub md_flags: u8,
-}
-
-/// A CTA Video Capability Data Block (Extended Tag 0x00).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CtaVideoCapability {
-    /// Selectable RGB Quantization Range (Q, bit 7).
-    pub selectable_quantization_range_rgb: bool,
-    /// Selectable YCC Quantization Range (QS, bit 6).
-    pub selectable_quantization_range_ycc: bool,
-    /// Preferred Timing overscan/underscan behavior (PT, bits 5..4).
-    pub pt_behavior: u8,
-    /// IT Video overscan/underscan behavior (IT, bits 3..2).
-    pub it_behavior: u8,
-    /// CE Video overscan/underscan behavior (CE, bits 1..0).
-    pub ce_behavior: u8,
-}
-
-/// A CTA data block with its three-bit tag and raw payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CtaDataBlock {
-    /// CTA data-block tag.
-    pub tag: u8,
-    /// Data-block payload without the header byte.
-    pub payload: Vec<u8>,
-}
-
-/// A CTA Short Audio Descriptor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CtaAudioDescriptor {
-    /// CTA audio coding format, 1 = LPCM.
-    pub format: u8,
-    /// Maximum channel count.
-    pub channels: u8,
-    /// Supported sample-rate bit mask.
-    pub sample_rates: u8,
-    /// Format-specific third byte.
-    pub format_specific: u8,
-}
-
-/// A CTA Video Data Block entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CtaVideoMode {
-    /// CEA/CTA Video Identification Code without the native bit.
-    pub vic: u8,
-    /// Whether this entry is marked native.
-    pub native: bool,
-}
-
-/// A CTA Vendor-Specific Data Block (Tag 3).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CtaVendorSpecificBlock {
-    /// HDMI 1.4b VSDB (IEEE OUI 0x000C03).
-    Hdmi14b {
-        /// Source Physical Address (CEC A.B.C.D).
-        physical_address: [u8; 2],
-        /// Maximum TMDS clock in MHz, if specified.
-        max_tmds_clock_mhz: Option<u16>,
-        /// Deep Color support flags (byte 5).
-        deep_color_flags: u8,
-        /// Latency and video feature flags (byte 7).
-        feature_flags: u8,
-        /// Original payload including the 3-byte OUI.
-        raw: Vec<u8>,
-    },
-    /// HDMI Forum (HDMI 2.0+) VSDB (IEEE OUI 0xC45DD8).
-    HdmiForum {
-        /// HF-VSDB version (usually 1).
-        version: u8,
-        /// Maximum TMDS character rate in MHz, if specified (5 MHz units).
-        max_tmds_character_rate_mhz: Option<u16>,
-        /// SCDC and scrambling capability flags (byte 5).
-        scdc_flags: u8,
-        /// Deep Color 4:2:0 support flags (byte 7).
-        deep_color_420_flags: u8,
-        /// Original payload including the 3-byte OUI.
-        raw: Vec<u8>,
-    },
-    /// AMD FreeSync VSDB (IEEE OUI 0x00001A).
-    AmdFreeSync {
-        /// FreeSync block version.
-        version: u8,
-        /// Minimum supported refresh rate in Hz, if specified.
-        min_refresh_hz: Option<u8>,
-        /// Maximum supported refresh rate in Hz, if specified.
-        max_refresh_hz: Option<u8>,
-        /// FreeSync capability flags (LFC, Native Color Space, etc.).
-        flags: u8,
-        /// Original payload including the 3-byte OUI.
-        raw: Vec<u8>,
-    },
-    /// Dolby Vision VSDB (IEEE OUI 0x00D046).
-    DolbyVision {
-        /// Dolby Vision version byte.
-        version: u8,
-        /// Original payload including the 3-byte OUI.
-        raw: Vec<u8>,
-    },
-    /// Any other Vendor-Specific Data Block.
-    Other {
-        /// 24-bit IEEE Organizationally Unique Identifier in Little-Endian byte order.
-        oui: [u8; 3],
-        /// Payload bytes after the 3-byte OUI.
-        payload: Vec<u8>,
-    },
-}
-
-/// Typed read-only views for CTA data blocks.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CtaDataBlockView {
-    /// Video Data Block entries.
-    Video {
-        /// Video Identification Code entries.
-        modes: Vec<CtaVideoMode>,
-    },
-    /// Short Audio Descriptor entries.
-    Audio {
-        /// Audio descriptors in source order.
-        descriptors: Vec<CtaAudioDescriptor>,
-    },
-    /// Speaker Allocation Data Block (Tag 4).
-    SpeakerAllocation(CtaSpeakerAllocation),
-    /// Vendor-Specific Data Block (Tag 3).
-    VendorSpecific(CtaVendorSpecificBlock),
-    /// Extended CTA data block.
-    Extended(CtaExtendedDataBlockView),
-    /// Any CTA tag not modeled by this version.
-    Unknown {
-        /// Three-bit CTA data-block tag.
-        tag: u8,
-        /// Uninterpreted payload bytes.
-        payload: Vec<u8>,
-    },
-}
-/// Typed views for selected CTA extended data blocks.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CtaExtendedDataBlockView {
-    /// Video Capability Data Block, extended tag 0x00.
-    VideoCapability(CtaVideoCapability),
-    /// Colorimetry Data Block, extended tag 0x05.
-    Colorimetry(CtaColorimetry),
-    /// CTA-861 HDR Static Metadata Data Block, extended tag 0x06.
-    HdrStaticMetadata {
-        /// Supported EOTF flags.
-        eotf_flags: u8,
-        /// Supported static metadata descriptor flags.
-        metadata_descriptor_flags: u8,
-        /// Optional desired content maximum luminance byte.
-        max_luminance: Option<u8>,
-        /// Optional frame-average maximum luminance byte.
-        max_frame_average_luminance: Option<u8>,
-        /// Optional minimum luminance byte.
-        min_luminance: Option<u8>,
-        /// Original extended-tag-prefixed payload.
-        raw: Vec<u8>,
-    },
-    /// CTA Adaptive-Sync Data Block, extended tag 0x1A; raw fields retained.
-    AdaptiveSync {
-        /// Original extended-tag-prefixed payload.
-        raw: Vec<u8>,
-    },
-    /// An unsupported CTA extended data block.
-    Unknown {
-        /// Extended tag code.
-        extended_tag: u8,
-        /// Payload bytes after the extended tag.
-        payload: Vec<u8>,
-    },
 }
 
 /// Parsed DisplayID base-section header.
@@ -463,15 +186,93 @@ pub enum DisplayIdDataBlockView {
 pub enum ExtensionWriteError {
     /// CTA data-block tag does not fit its three-bit field.
     InvalidCtaTag {
-        /// Supplied tag value.
+        /// Supplied tag.
         tag: u8,
     },
     /// CTA data-block payload exceeds its five-bit length field.
     CtaPayloadTooLong {
+        /// Supplied length.
+        length: usize,
+        /// Maximum length.
+        maximum: usize,
+    },
+    /// A CTA data block is shorter than the typed representation requires.
+    CtaPayloadTooShort {
+        /// CTA data-block tag.
+        tag: u8,
         /// Supplied payload length.
         length: usize,
-        /// Maximum representable payload length.
-        maximum: usize,
+        /// Minimum representable payload length.
+        minimum: usize,
+    },
+    /// A raw extended CTA payload has the wrong extended tag or is empty.
+    InvalidCtaExtendedPayload {
+        /// Expected extended tag.
+        expected_tag: u8,
+        /// Actual first byte, if present.
+        actual_tag: Option<u8>,
+        /// Supplied payload length.
+        length: usize,
+    },
+    /// HDR luminance fields must be present as a contiguous prefix.
+    InvalidCtaHdrLuminanceOrder,
+    /// An HDR raw tail cannot be preserved after shortening its luminance prefix.
+    InvalidCtaHdrRawTail,
+    /// A CTA Video Identification Code cannot fit its seven-bit field.
+    InvalidCtaVideoCode {
+        /// Zero-based mode index.
+        index: usize,
+        /// Supplied VIC.
+        vic: u8,
+    },
+    /// A CTA audio format cannot fit its four-bit field.
+    InvalidCtaAudioFormat {
+        /// Zero-based descriptor index.
+        index: usize,
+        /// Supplied format.
+        format: u8,
+    },
+    /// A CTA audio channel count is outside 1..=8.
+    InvalidCtaAudioChannels {
+        /// Zero-based descriptor index.
+        index: usize,
+        /// Supplied channel count.
+        channels: u8,
+    },
+    /// A CTA audio descriptor uses the reserved sample-rate bit.
+    InvalidCtaAudioSampleRates {
+        /// Zero-based descriptor index.
+        index: usize,
+        /// Supplied mask.
+        sample_rates: u8,
+    },
+    /// A CTA bitfield value is outside its encoded range.
+    InvalidCtaField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u8,
+        /// Maximum value.
+        maximum: u8,
+    },
+    /// A known CTA vendor-specific block has a different OUI than its typed variant.
+    InvalidCtaVendorOui {
+        /// Expected OUI in little-endian byte order.
+        expected: [u8; 3],
+        /// OUI found in the raw payload.
+        actual: [u8; 3],
+    },
+    /// A vendor-specific TMDS rate is not representable in its five-MHz byte field.
+    InvalidCtaVendorRate {
+        /// Typed field name.
+        field: &'static str,
+        /// Supplied rate in MHz.
+        value: u16,
+    },
+    /// A typed vendor-specific field cannot be represented by the raw payload shape.
+    InvalidCtaVendorField {
+        /// Typed field name.
+        field: &'static str,
     },
     /// The complete CTA data-block collection does not fit before byte 127.
     CtaDataBlocksTooLong {
@@ -480,25 +281,25 @@ pub enum ExtensionWriteError {
         /// Maximum collection length.
         maximum: usize,
     },
-    /// The CTA DTD collection exceeds the available 18-byte slots.
+    /// The CTA DTD collection exceeds available slots.
     CtaDtdsTooLong {
         /// Supplied DTD count.
         count: usize,
-        /// Maximum DTD count for the collection.
+        /// Maximum slot count.
         maximum: usize,
     },
-    /// A CTA DTD cannot be represented by the EDID DTD fields.
+    /// A CTA DTD cannot be represented.
     CtaDtdInvalid {
         /// Zero-based DTD index.
         index: usize,
-        /// Underlying DTD validation error.
+        /// Underlying error.
         source: crate::error::DtdError,
     },
-    /// The DisplayID data-block payload cannot fit in one extension.
+    /// The DisplayID payload cannot fit in one extension.
     DisplayIdPayloadTooLong {
         /// Encoded payload length.
         length: usize,
-        /// Maximum payload length.
+        /// Maximum length.
         maximum: usize,
     },
     /// The target block is not a CTA-861 extension.
@@ -506,7 +307,6 @@ pub enum ExtensionWriteError {
     /// The target block is not a DisplayID extension.
     NotDisplayId,
 }
-
 impl std::fmt::Display for ExtensionWriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -517,16 +317,77 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "CTA data-block payload length {length} exceeds the {maximum}-byte maximum"
             ),
+            Self::InvalidCtaVideoCode { index, vic } => write!(
+                f,
+                "CTA video code {vic} at index {index} is outside 1..=127"
+            ),
+            Self::InvalidCtaAudioFormat { index, format } => write!(
+                f,
+                "CTA audio format {format} at index {index} is outside 1..=15"
+            ),
+            Self::InvalidCtaAudioChannels { index, channels } => write!(
+                f,
+                "CTA audio channel count {channels} at index {index} is outside 1..=8"
+            ),
+            Self::InvalidCtaAudioSampleRates {
+                index,
+                sample_rates,
+            } => write!(
+                f,
+                "CTA audio sample-rate mask 0x{sample_rates:02X} at index {index} uses a reserved bit"
+            ),
+            Self::CtaPayloadTooShort {
+                tag,
+                length,
+                minimum,
+            } => write!(
+                f,
+                "CTA data-block tag {tag} payload length {length} is below minimum {minimum}"
+            ),
+            Self::InvalidCtaExtendedPayload {
+                expected_tag,
+                actual_tag,
+                length,
+            } => write!(
+                f,
+                "CTA extended payload length {length} has tag {actual_tag:?}, expected {expected_tag}"
+            ),
+            Self::InvalidCtaVendorOui { expected, actual } => write!(
+                f,
+                "CTA vendor OUI {actual:02X?} does not match expected {expected:02X?}"
+            ),
+            Self::InvalidCtaVendorRate { field, value } => write!(
+                f,
+                "CTA vendor field {field} rate {value} MHz is not representable in 5-MHz units"
+            ),
+            Self::InvalidCtaVendorField { field } => {
+                write!(
+                    f,
+                    "CTA vendor field {field} is not representable by the raw payload"
+                )
+            }
+            Self::InvalidCtaHdrLuminanceOrder => {
+                f.write_str("CTA HDR luminance fields must be a contiguous prefix")
+            }
+            Self::InvalidCtaHdrRawTail => f.write_str(
+                "CTA HDR raw tail cannot be preserved after shortening the luminance prefix",
+            ),
+            Self::InvalidCtaField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "CTA field {field} value {value} exceeds maximum {maximum}"
+            ),
             Self::CtaDataBlocksTooLong { length, maximum } => write!(
                 f,
                 "CTA data-block collection length {length} exceeds the {maximum}-byte maximum"
             ),
-            Self::CtaDtdsTooLong { count, maximum } => {
-                write!(
-                    f,
-                    "CTA DTD count {count} exceeds the {maximum}-slot maximum"
-                )
-            }
+            Self::CtaDtdsTooLong { count, maximum } => write!(
+                f,
+                "CTA DTD count {count} exceeds the {maximum}-slot maximum"
+            ),
             Self::CtaDtdInvalid { index, source } => {
                 write!(f, "CTA DTD {index} is invalid: {source}")
             }
@@ -557,264 +418,6 @@ impl DisplayIdDataBlock {
 }
 
 impl std::error::Error for ExtensionWriteError {}
-
-impl CtaDataBlock {
-    /// Encode this block as a CTA data-block header followed by its payload.
-    pub fn encode(&self) -> Result<Vec<u8>, ExtensionWriteError> {
-        const MAX_PAYLOAD_LENGTH: usize = 0x1F;
-
-        if self.tag > 0x07 {
-            return Err(ExtensionWriteError::InvalidCtaTag { tag: self.tag });
-        }
-        if self.payload.len() > MAX_PAYLOAD_LENGTH {
-            return Err(ExtensionWriteError::CtaPayloadTooLong {
-                length: self.payload.len(),
-                maximum: MAX_PAYLOAD_LENGTH,
-            });
-        }
-
-        let mut encoded = Vec::with_capacity(self.payload.len() + 1);
-        encoded.push((self.tag << 5) | self.payload.len() as u8);
-        encoded.extend_from_slice(&self.payload);
-        Ok(encoded)
-    }
-
-    /// Decode this data block into a typed read-only view.
-    pub fn view(&self) -> Result<CtaDataBlockView, ExtensionError> {
-        match self.tag {
-            1 => {
-                if self.payload.is_empty() || !self.payload.len().is_multiple_of(3) {
-                    return Err(ExtensionError::InvalidAudioDataBlockLength {
-                        length: self.payload.len(),
-                    });
-                }
-                let descriptors = self
-                    .payload
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|bytes| CtaAudioDescriptor {
-                        format: bytes[0] >> 3,
-                        channels: (bytes[0] & 0x07) + 1,
-                        sample_rates: bytes[1],
-                        format_specific: bytes[2],
-                    })
-                    .collect();
-                Ok(CtaDataBlockView::Audio { descriptors })
-            }
-            2 => {
-                if self.payload.is_empty() {
-                    return Err(ExtensionError::InvalidVideoDataBlockLength { length: 0 });
-                }
-                let mut modes = Vec::with_capacity(self.payload.len());
-                for (index, &code) in self.payload.iter().enumerate() {
-                    let vic = code & 0x7F;
-                    if vic == 0 {
-                        return Err(ExtensionError::InvalidVideoCode { index });
-                    }
-                    modes.push(CtaVideoMode {
-                        vic,
-                        native: code & 0x80 != 0,
-                    });
-                }
-                Ok(CtaDataBlockView::Video { modes })
-            }
-            3 => self.vendor_specific_view(),
-            4 => {
-                if self.payload.is_empty() {
-                    return Err(ExtensionError::InvalidSpeakerAllocationDataBlockLength {
-                        length: 0,
-                    });
-                }
-                let mut raw_mask = [0u8; 3];
-                let len = self.payload.len().min(3);
-                raw_mask[..len].copy_from_slice(&self.payload[..len]);
-                Ok(CtaDataBlockView::SpeakerAllocation(CtaSpeakerAllocation {
-                    raw_mask,
-                }))
-            }
-            7 => self.extended_view(),
-            tag => Ok(CtaDataBlockView::Unknown {
-                tag,
-                payload: self.payload.clone(),
-            }),
-        }
-    }
-
-    fn extended_view(&self) -> Result<CtaDataBlockView, ExtensionError> {
-        let Some(&extended_tag) = self.payload.first() else {
-            return Err(ExtensionError::TruncatedExtendedDataBlock {
-                extended_tag: 0,
-                length: 0,
-                minimum: 1,
-            });
-        };
-        match extended_tag {
-            0x00 => {
-                if self.payload.len() < 2 {
-                    return Err(ExtensionError::TruncatedExtendedDataBlock {
-                        extended_tag,
-                        length: self.payload.len(),
-                        minimum: 2,
-                    });
-                }
-                let b = self.payload[1];
-                Ok(CtaDataBlockView::Extended(
-                    CtaExtendedDataBlockView::VideoCapability(CtaVideoCapability {
-                        selectable_quantization_range_rgb: b & 0x80 != 0,
-                        selectable_quantization_range_ycc: b & 0x40 != 0,
-                        pt_behavior: (b >> 4) & 0x03,
-                        it_behavior: (b >> 2) & 0x03,
-                        ce_behavior: b & 0x03,
-                    }),
-                ))
-            }
-            0x05 => {
-                if self.payload.len() < 3 {
-                    return Err(ExtensionError::TruncatedExtendedDataBlock {
-                        extended_tag,
-                        length: self.payload.len(),
-                        minimum: 3,
-                    });
-                }
-                let b1 = self.payload[1];
-                let b2 = self.payload[2];
-                Ok(CtaDataBlockView::Extended(
-                    CtaExtendedDataBlockView::Colorimetry(CtaColorimetry {
-                        xvycc601: b1 & 0x01 != 0,
-                        xvycc709: b1 & 0x02 != 0,
-                        sycc601: b1 & 0x04 != 0,
-                        adobe_ycc601: b1 & 0x08 != 0,
-                        adobe_rgb: b1 & 0x10 != 0,
-                        bt2020_cycc: b1 & 0x20 != 0,
-                        bt2020_ycc: b1 & 0x40 != 0,
-                        bt2020_rgb: b1 & 0x80 != 0,
-                        md_flags: b2 & 0x03,
-                    }),
-                ))
-            }
-            0x06 => {
-                if self.payload.len() < 3 {
-                    return Err(ExtensionError::TruncatedExtendedDataBlock {
-                        extended_tag,
-                        length: self.payload.len(),
-                        minimum: 3,
-                    });
-                }
-                Ok(CtaDataBlockView::Extended(
-                    CtaExtendedDataBlockView::HdrStaticMetadata {
-                        eotf_flags: self.payload[1],
-                        metadata_descriptor_flags: self.payload[2],
-                        max_luminance: self.payload.get(3).copied(),
-                        max_frame_average_luminance: self.payload.get(4).copied(),
-                        min_luminance: self.payload.get(5).copied(),
-                        raw: self.payload.clone(),
-                    },
-                ))
-            }
-            0x1A => Ok(CtaDataBlockView::Extended(
-                CtaExtendedDataBlockView::AdaptiveSync {
-                    raw: self.payload.clone(),
-                },
-            )),
-            extended_tag => Ok(CtaDataBlockView::Extended(
-                CtaExtendedDataBlockView::Unknown {
-                    extended_tag,
-                    payload: self.payload[1..].to_vec(),
-                },
-            )),
-        }
-    }
-
-    fn vendor_specific_view(&self) -> Result<CtaDataBlockView, ExtensionError> {
-        if self.payload.len() < 3 {
-            return Err(ExtensionError::TruncatedVendorSpecificDataBlock {
-                length: self.payload.len(),
-            });
-        }
-        let oui = [self.payload[0], self.payload[1], self.payload[2]];
-        match oui {
-            // HDMI 1.4b OUI: 0x000C03 (Little-Endian: 0x03, 0x0C, 0x00)
-            [0x03, 0x0C, 0x00] => {
-                let physical_address = if self.payload.len() >= 5 {
-                    [self.payload[3], self.payload[4]]
-                } else {
-                    [0, 0]
-                };
-                let deep_color_flags = self.payload.get(5).copied().unwrap_or(0);
-                let max_tmds_clock_mhz = self
-                    .payload
-                    .get(6)
-                    .copied()
-                    .filter(|&b| b != 0)
-                    .map(|b| b as u16 * 5);
-                let feature_flags = self.payload.get(7).copied().unwrap_or(0);
-                Ok(CtaDataBlockView::VendorSpecific(
-                    CtaVendorSpecificBlock::Hdmi14b {
-                        physical_address,
-                        max_tmds_clock_mhz,
-                        deep_color_flags,
-                        feature_flags,
-                        raw: self.payload.clone(),
-                    },
-                ))
-            }
-            // HDMI Forum OUI: 0xC45DD8 (Little-Endian: 0xD8, 0x5D, 0xC4)
-            [0xD8, 0x5D, 0xC4] => {
-                let version = self.payload.get(3).copied().unwrap_or(1);
-                let max_tmds_character_rate_mhz = self
-                    .payload
-                    .get(4)
-                    .copied()
-                    .filter(|&b| b != 0)
-                    .map(|b| b as u16 * 5);
-                let scdc_flags = self.payload.get(5).copied().unwrap_or(0);
-                let deep_color_420_flags = self.payload.get(7).copied().unwrap_or(0);
-                Ok(CtaDataBlockView::VendorSpecific(
-                    CtaVendorSpecificBlock::HdmiForum {
-                        version,
-                        max_tmds_character_rate_mhz,
-                        scdc_flags,
-                        deep_color_420_flags,
-                        raw: self.payload.clone(),
-                    },
-                ))
-            }
-            // AMD FreeSync OUI: 0x00001A (Little-Endian: 0x1A, 0x00, 0x00)
-            [0x1A, 0x00, 0x00] => {
-                let version = self.payload.get(3).copied().unwrap_or(1);
-                let min_refresh_hz = self.payload.get(4).copied();
-                let max_refresh_hz = self.payload.get(5).copied();
-                let flags = self.payload.get(6).copied().unwrap_or(0);
-                Ok(CtaDataBlockView::VendorSpecific(
-                    CtaVendorSpecificBlock::AmdFreeSync {
-                        version,
-                        min_refresh_hz,
-                        max_refresh_hz,
-                        flags,
-                        raw: self.payload.clone(),
-                    },
-                ))
-            }
-            // Dolby Vision OUI: 0x00D046 (Little-Endian: 0x46, 0xD0, 0x00)
-            [0x46, 0xD0, 0x00] => {
-                let version = self.payload.get(3).copied().unwrap_or(0);
-                Ok(CtaDataBlockView::VendorSpecific(
-                    CtaVendorSpecificBlock::DolbyVision {
-                        version,
-                        raw: self.payload.clone(),
-                    },
-                ))
-            }
-            _ => Ok(CtaDataBlockView::VendorSpecific(
-                CtaVendorSpecificBlock::Other {
-                    oui,
-                    payload: self.payload[3..].to_vec(),
-                },
-            )),
-        }
-    }
-}
 
 impl DisplayIdDataBlock {
     /// Decode this data block into a typed read-only view.
@@ -1407,7 +1010,8 @@ fn parse_cta_data_blocks(
 #[cfg(test)]
 mod tests {
     use super::{
-        CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock,
+        CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
+        CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
         CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
         DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
         ExtensionWriteError,
@@ -2153,6 +1757,495 @@ mod tests {
             payload: vec![16, 31],
         };
         assert_eq!(block.encode().unwrap(), vec![0x42, 16, 31]);
+    }
+    #[test]
+    fn encodes_lossless_cta_typed_views() {
+        let video = CtaDataBlockView::Video {
+            modes: vec![
+                CtaVideoMode {
+                    vic: 16,
+                    native: true,
+                },
+                CtaVideoMode {
+                    vic: 31,
+                    native: false,
+                },
+            ],
+        };
+        assert_eq!(
+            video.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 2,
+                payload: vec![0x90, 31]
+            }
+        );
+
+        let audio = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 1,
+                channels: 2,
+                sample_rates: 0x07,
+                format_specific: 0x10,
+            }],
+        };
+        assert_eq!(
+            audio.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 1,
+                payload: vec![0x09, 0x07, 0x10]
+            }
+        );
+
+        let unknown = CtaDataBlockView::Unknown {
+            tag: 5,
+            payload: vec![1, 2, 3],
+        };
+        assert_eq!(
+            unknown.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 5,
+                payload: vec![1, 2, 3]
+            }
+        );
+
+        let vendor = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Other {
+            oui: [0xAA, 0xBB, 0xCC],
+            payload: vec![0x11, 0x22],
+        });
+        assert_eq!(
+            vendor.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0xAA, 0xBB, 0xCC, 0x11, 0x22],
+            }
+        );
+
+        let extended = CtaDataBlockView::Extended(CtaExtendedDataBlockView::Unknown {
+            extended_tag: 0x1A,
+            payload: vec![0x01, 0x02],
+        });
+        assert_eq!(
+            extended.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x1A, 0x01, 0x02]
+            }
+        );
+    }
+    #[test]
+    fn encodes_cta_speaker_colorimetry_and_video_capability_views() {
+        let speaker = CtaDataBlockView::SpeakerAllocation(CtaSpeakerAllocation {
+            raw_mask: [0x07, 0x05, 0x01],
+        });
+        assert_eq!(
+            speaker.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 4,
+                payload: vec![0x07, 0x05, 0x01],
+            }
+        );
+
+        let colorimetry =
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Colorimetry(CtaColorimetry {
+                xvycc601: true,
+                xvycc709: false,
+                sycc601: true,
+                adobe_ycc601: false,
+                adobe_rgb: true,
+                bt2020_cycc: false,
+                bt2020_ycc: true,
+                bt2020_rgb: true,
+                md_flags: 2,
+            }));
+        assert_eq!(
+            colorimetry.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x05, 0xD5, 0x02],
+            }
+        );
+
+        let capability = CtaDataBlockView::Extended(CtaExtendedDataBlockView::VideoCapability(
+            CtaVideoCapability {
+                selectable_quantization_range_rgb: true,
+                selectable_quantization_range_ycc: false,
+                pt_behavior: 2,
+                it_behavior: 1,
+                ce_behavior: 3,
+            },
+        ));
+        assert_eq!(
+            capability.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x00, 0xA7],
+            }
+        );
+    }
+    #[test]
+    fn encodes_hdr_static_metadata_and_preserves_extra_raw_bytes() {
+        let hdr = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0x07,
+            metadata_descriptor_flags: 0x01,
+            max_luminance: Some(0x40),
+            max_frame_average_luminance: Some(0x20),
+            min_luminance: Some(0x01),
+            raw: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+        });
+        assert_eq!(
+            hdr.to_data_block().unwrap(),
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+            }
+        );
+    }
+
+    #[test]
+    fn typed_cta_encoders_roundtrip_through_views() {
+        let views = [
+            CtaDataBlockView::Video {
+                modes: vec![CtaVideoMode {
+                    vic: 16,
+                    native: true,
+                }],
+            },
+            CtaDataBlockView::Audio {
+                descriptors: vec![CtaAudioDescriptor {
+                    format: 1,
+                    channels: 2,
+                    sample_rates: 0x07,
+                    format_specific: 0x10,
+                }],
+            },
+            CtaDataBlockView::SpeakerAllocation(CtaSpeakerAllocation {
+                raw_mask: [0x07, 0x05, 0x01],
+            }),
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Colorimetry(CtaColorimetry {
+                xvycc601: true,
+                xvycc709: false,
+                sycc601: true,
+                adobe_ycc601: false,
+                adobe_rgb: true,
+                bt2020_cycc: false,
+                bt2020_ycc: true,
+                bt2020_rgb: true,
+                md_flags: 2,
+            })),
+        ];
+        for view in views {
+            let encoded = view.to_data_block().unwrap();
+            assert_eq!(encoded.view().unwrap(), view);
+        }
+    }
+    #[test]
+    fn encodes_known_vendor_views_losslessly_and_writes_typed_fields() {
+        let source_blocks = [
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0x03, 0x0C, 0x00, 0x10, 0x00, 0x38, 0x3C, 0x20, 0xAA],
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0xD8, 0x5D, 0xC4, 1, 0x78, 0xDC, 0x00, 0x01, 0xBB],
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0x1A, 0x00, 0x00, 1, 48, 144, 1, 0xCC],
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0x46, 0xD0, 0x00, 2, 0x11, 0x22, 0xDD],
+            },
+        ];
+        for source in &source_blocks {
+            let view = source.view().unwrap();
+            assert_eq!(view.to_data_block().unwrap(), source.clone());
+        }
+
+        let mut hdmi14b = match source_blocks[0].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::Hdmi14b {
+            physical_address,
+            max_tmds_clock_mhz,
+            deep_color_flags,
+            feature_flags,
+            ..
+        } = &mut hdmi14b
+        {
+            *physical_address = [0x20, 0x01];
+            *max_tmds_clock_mhz = Some(400);
+            *deep_color_flags = 0x70;
+            *feature_flags = 0x40;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(hdmi14b)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(&encoded.payload[3..8], &[0x20, 0x01, 0x70, 0x50, 0x40]);
+
+        let mut forum = match source_blocks[1].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::HdmiForum {
+            version,
+            max_tmds_character_rate_mhz,
+            scdc_flags,
+            deep_color_420_flags,
+            ..
+        } = &mut forum
+        {
+            *version = 2;
+            *max_tmds_character_rate_mhz = Some(700);
+            *scdc_flags = 0xAA;
+            *deep_color_420_flags = 0x02;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(forum)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(&encoded.payload[3..8], &[2, 0x8C, 0xAA, 0x00, 0x02]);
+
+        let mut freesync = match source_blocks[2].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::AmdFreeSync {
+            version,
+            min_refresh_hz,
+            max_refresh_hz,
+            flags,
+            ..
+        } = &mut freesync
+        {
+            *version = 2;
+            *min_refresh_hz = Some(50);
+            *max_refresh_hz = Some(165);
+            *flags = 2;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(freesync)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(&encoded.payload[3..7], &[2, 50, 165, 2]);
+
+        let mut dolby = match source_blocks[3].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::DolbyVision { version, .. } = &mut dolby {
+            *version = 3;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(dolby)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(encoded.payload, vec![0x46, 0xD0, 0x00, 3, 0x11, 0x22, 0xDD]);
+    }
+    #[test]
+    fn validates_hdr_raw_prefix_and_drops_removed_luminance_bytes() {
+        let malformed = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0,
+            metadata_descriptor_flags: 0,
+            max_luminance: None,
+            max_frame_average_luminance: None,
+            min_luminance: None,
+            raw: vec![0x05, 0x01, 0x02],
+        });
+        assert!(matches!(
+            malformed.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x06,
+                actual_tag: Some(0x05),
+                length: 3
+            })
+        ));
+
+        let removed = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0x07,
+            metadata_descriptor_flags: 0x01,
+            max_luminance: None,
+            max_frame_average_luminance: Some(0x20),
+            min_luminance: Some(0x01),
+            raw: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+        });
+        assert!(matches!(
+            removed.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaHdrLuminanceOrder)
+        ));
+
+        let retained = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0x07,
+            metadata_descriptor_flags: 0x01,
+            max_luminance: None,
+            max_frame_average_luminance: None,
+            min_luminance: None,
+            raw: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+        });
+        assert!(matches!(
+            retained.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaHdrRawTail)
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_known_vendor_encoder_inputs() {
+        let short = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Hdmi14b {
+            physical_address: [1, 0],
+            max_tmds_clock_mhz: None,
+            deep_color_flags: 0,
+            feature_flags: 0,
+            raw: vec![0x03, 0x0C, 0x00],
+        });
+        assert!(matches!(
+            short.to_data_block(),
+            Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 3,
+                length: 3,
+                minimum: 5
+            })
+        ));
+        let default_valued_tail =
+            CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Hdmi14b {
+                physical_address: [0x10, 0],
+                max_tmds_clock_mhz: None,
+                deep_color_flags: 0,
+                feature_flags: 0,
+                raw: vec![0x03, 0x0C, 0x00, 0x10],
+            });
+        assert!(matches!(
+            default_valued_tail.to_data_block(),
+            Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 3,
+                length: 4,
+                minimum: 5
+            })
+        ));
+
+        let wrong_oui = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::DolbyVision {
+            version: 2,
+            raw: vec![0x03, 0x0C, 0x00, 2],
+        });
+        assert!(matches!(
+            wrong_oui.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaVendorOui { .. })
+        ));
+
+        let invalid_rate = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::HdmiForum {
+            version: 1,
+            max_tmds_character_rate_mhz: Some(701),
+            scdc_flags: 0,
+            deep_color_420_flags: 0,
+            raw: vec![0xD8, 0x5D, 0xC4, 1, 0, 0, 0, 0],
+        });
+        assert!(matches!(
+            invalid_rate.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaVendorRate {
+                field: "max_tmds_character_rate_mhz",
+                value: 701
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_unrepresentable_cta_typed_view_fields() {
+        assert!(matches!(
+            (CtaDataBlockView::Video {
+                modes: vec![CtaVideoMode {
+                    vic: 128,
+                    native: false
+                }],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaVideoCode { index: 0, vic: 128 })
+        ));
+        assert!(matches!(
+            (CtaDataBlockView::Audio {
+                descriptors: vec![CtaAudioDescriptor {
+                    format: 32,
+                    channels: 2,
+                    sample_rates: 0,
+                    format_specific: 0,
+                }],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioFormat {
+                index: 0,
+                format: 32
+            })
+        ));
+        assert!(matches!(
+            (CtaDataBlockView::Audio {
+                descriptors: vec![CtaAudioDescriptor {
+                    format: 1,
+                    channels: 0,
+                    sample_rates: 0,
+                    format_specific: 0,
+                }],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioChannels {
+                index: 0,
+                channels: 0
+            })
+        ));
+    }
+    #[test]
+    fn rejects_empty_and_malformed_cta_typed_payloads() {
+        assert!(matches!(
+            (CtaDataBlockView::Video { modes: vec![] }).to_data_block(),
+            Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 2,
+                length: 0,
+                minimum: 1
+            })
+        ));
+        assert!(matches!(
+            (CtaDataBlockView::Audio {
+                descriptors: vec![]
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 1,
+                length: 0,
+                minimum: 3
+            })
+        ));
+        assert!(matches!(
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw: vec![] })
+                .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x1A,
+                actual_tag: None,
+                length: 0
+            })
+        ));
+        assert!(matches!(
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync {
+                raw: vec![0x05, 0x01]
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x1A,
+                actual_tag: Some(0x05),
+                length: 2
+            })
+        ));
+        assert!(matches!(
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+                eotf_flags: 0,
+                metadata_descriptor_flags: 0,
+                max_luminance: None,
+                max_frame_average_luminance: Some(0x20),
+                min_luminance: None,
+                raw: vec![],
+            })
+            .to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x06,
+                actual_tag: None,
+                length: 0
+            })
+        ));
     }
 
     #[test]
