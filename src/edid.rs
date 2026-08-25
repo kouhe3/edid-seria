@@ -91,6 +91,13 @@ impl EdidBlock {
         // Digital display (bit 7); interface/color-depth undefined — the
         // typical starting point for a modern PC-monitor override.
         raw[20] = 0x80;
+        // Unused standard timing entries use 01 01.
+        raw[38..54].fill(0x01);
+        // Unused descriptor slots use the dummy descriptor tag 0x10.
+        for slot in 0..DETAILED_SLOTS {
+            let offset = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
+            raw[offset + 3] = 0x10;
+        }
         // Extension count = 0
         raw[126] = 0x00;
         let mut block = Self { raw };
@@ -1308,5 +1315,14 @@ mod tests {
         assert_eq!(all_timings.len(), 2);
         assert_eq!(all_timings[0].h_active, 1920);
         assert_eq!(all_timings[1].h_active, 1920);
+    }
+    #[test]
+    fn default_block_uses_edid_unused_slot_encodings() {
+        let block = EdidBlock::new_default();
+        assert_eq!(&block.raw[38..54], &[0x01u8, 0x01].repeat(8));
+        for slot in 0..4 {
+            let offset = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
+            assert_eq!(block.raw[offset..offset + 4], [0, 0, 0, 0x10]);
+        }
     }
 }

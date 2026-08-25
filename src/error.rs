@@ -42,6 +42,7 @@ pub enum EdidError {
 
 /// Errors returned while decoding or encoding base-block metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataError {
     /// The block does not contain the EDID base-block header.
     NotBaseBlock,
