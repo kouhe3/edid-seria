@@ -554,6 +554,54 @@ impl Edid {
         }
         Ok(())
     }
+    /// Insert an extension at `index`, updating the base extension count.
+    pub fn insert_extension(
+        &mut self,
+        index: usize,
+        extension: EdidBlock,
+    ) -> Result<(), EdidError> {
+        if index > self.extensions.len() {
+            return Err(EdidError::ExtensionIndexOutOfRange {
+                index,
+                count: self.extensions.len(),
+            });
+        }
+        if self.extensions.len() >= u8::MAX as usize {
+            return Err(EdidError::TooManyExtensions {
+                count: self.extensions.len() + 1,
+            });
+        }
+        self.extensions.insert(index, extension);
+        self.base.raw[126] = self.extensions.len() as u8;
+        self.base.update_checksum();
+        Ok(())
+    }
+
+    /// Replace an extension at `index`, preserving extension ordering.
+    pub fn replace_extension(
+        &mut self,
+        index: usize,
+        extension: EdidBlock,
+    ) -> Result<(), EdidError> {
+        let Some(target) = self.extensions.get_mut(index) else {
+            return Err(EdidError::ExtensionIndexOutOfRange {
+                index,
+                count: self.extensions.len(),
+            });
+        };
+        *target = extension;
+        Ok(())
+    }
+
+    /// Remove an extension and update the base extension count.
+    pub fn remove_extension(&mut self, index: usize) -> Option<EdidBlock> {
+        let extension = (index < self.extensions.len()).then(|| self.extensions.remove(index));
+        if extension.is_some() {
+            self.base.raw[126] = self.extensions.len() as u8;
+            self.base.update_checksum();
+        }
+        extension
+    }
 
     /// Format the complete EDID sequence (base + extensions) as continuous hex.
     #[must_use]
@@ -1324,5 +1372,22 @@ mod tests {
             let offset = DETAILED_START + slot * EDID_DESCRIPTOR_LEN;
             assert_eq!(block.raw[offset..offset + 4], [0, 0, 0, 0x10]);
         }
+    }
+
+    #[test]
+    fn manages_extension_lifecycle_and_checked_output() {
+        let mut edid = Edid {
+            base: EdidBlock::new_default(),
+            extensions: Vec::new(),
+        };
+        let extension = EdidBlock::from_cta_data_blocks(3, &[]).unwrap();
+        edid.insert_extension(0, extension.clone()).unwrap();
+        assert_eq!(edid.extensions, vec![extension.clone()]);
+        assert_eq!(edid.base.raw[126], 1);
+        edid.replace_extension(0, extension.clone()).unwrap();
+        assert_eq!(edid.remove_extension(0), Some(extension));
+        assert!(edid.extensions.is_empty());
+        assert_eq!(edid.base.raw[126], 0);
+        assert!(edid.to_bytes_checked().is_ok());
     }
 }

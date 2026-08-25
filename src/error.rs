@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Errors returned when an EDID block cannot be accepted by the strict parser.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EdidError {
     /// The input is not exactly one complete EDID block.
     InvalidLength {
@@ -30,6 +31,18 @@ pub enum EdidError {
         declared: usize,
         /// Number of extension blocks supplied.
         actual: usize,
+    },
+    /// An extension index is outside the current extension list.
+    ExtensionIndexOutOfRange {
+        /// Requested zero-based extension index.
+        index: usize,
+        /// Current extension count.
+        count: usize,
+    },
+    /// The extension count cannot be represented by the base block byte.
+    TooManyExtensions {
+        /// Requested extension count.
+        count: usize,
     },
     /// The base block uses an unsupported EDID version.
     UnsupportedVersion {
@@ -457,6 +470,13 @@ impl fmt::Display for EdidError {
                 f,
                 "EDID declares {declared} extension blocks but supplied {actual}"
             ),
+            Self::ExtensionIndexOutOfRange { index, count } => write!(
+                f,
+                "extension index {index} is outside the {count}-extension list"
+            ),
+            Self::TooManyExtensions { count } => {
+                write!(f, "EDID contains too many extension blocks: {count}")
+            }
             Self::UnsupportedVersion { major, minor } => {
                 write!(f, "unsupported EDID version {major}.{minor}")
             }
