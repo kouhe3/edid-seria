@@ -480,6 +480,20 @@ pub enum ExtensionWriteError {
         /// Maximum collection length.
         maximum: usize,
     },
+    /// The CTA DTD collection exceeds the available 18-byte slots.
+    CtaDtdsTooLong {
+        /// Supplied DTD count.
+        count: usize,
+        /// Maximum DTD count for the collection.
+        maximum: usize,
+    },
+    /// A CTA DTD cannot be represented by the EDID DTD fields.
+    CtaDtdInvalid {
+        /// Zero-based DTD index.
+        index: usize,
+        /// Underlying DTD validation error.
+        source: crate::error::DtdError,
+    },
 }
 
 impl std::fmt::Display for ExtensionWriteError {
@@ -496,6 +510,15 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "CTA data-block collection length {length} exceeds the {maximum}-byte maximum"
             ),
+            Self::CtaDtdsTooLong { count, maximum } => {
+                write!(
+                    f,
+                    "CTA DTD count {count} exceeds the {maximum}-slot maximum"
+                )
+            }
+            Self::CtaDtdInvalid { index, source } => {
+                write!(f, "CTA DTD {index} is invalid: {source}")
+            }
         }
     }
 }
@@ -1047,22 +1070,32 @@ impl EdidBlock {
             tag => ExtensionKind::Unknown { tag },
         }
     }
-    /// Construct a CTA-861 extension containing only a data-block collection.
-    pub fn from_cta_data_blocks(
+    /// Construct a CTA-861 extension containing data blocks and DTDs.
+    pub fn from_cta_data_blocks_and_timings(
         revision: u8,
         blocks: &[CtaDataBlock],
+        timings: &[crate::timing::DetailedTiming],
     ) -> Result<Self, ExtensionWriteError> {
         const DATA_BLOCK_OFFSET: usize = 4;
-        const MAX_COLLECTION_LENGTH: usize = 123;
+        const DTD_SIZE: usize = 18;
 
         let mut collection = Vec::new();
-        for block in blocks {
-            collection.extend_from_slice(&block.encode()?);
+        for data_block in blocks {
+            collection.extend_from_slice(&data_block.encode()?);
         }
+        const MAX_COLLECTION_LENGTH: usize = 123;
         if collection.len() > MAX_COLLECTION_LENGTH {
             return Err(ExtensionWriteError::CtaDataBlocksTooLong {
                 length: collection.len(),
                 maximum: MAX_COLLECTION_LENGTH,
+            });
+        }
+        let dtd_offset = DATA_BLOCK_OFFSET + collection.len();
+        let maximum = (127usize.saturating_sub(dtd_offset)) / DTD_SIZE;
+        if timings.len() > maximum {
+            return Err(ExtensionWriteError::CtaDtdsTooLong {
+                count: timings.len(),
+                maximum,
             });
         }
 
@@ -1071,12 +1104,28 @@ impl EdidBlock {
         };
         block.raw[0] = 0x02;
         block.raw[1] = revision;
-        block.raw[2] = (DATA_BLOCK_OFFSET + collection.len()) as u8;
-        block.raw[3] = 0;
-        block.raw[DATA_BLOCK_OFFSET..DATA_BLOCK_OFFSET + collection.len()]
-            .copy_from_slice(&collection);
+        block.raw[2] = dtd_offset as u8;
+        block.raw[3] = timings.len() as u8;
+        block.raw[DATA_BLOCK_OFFSET..dtd_offset].copy_from_slice(&collection);
+
+        for (index, timing) in timings.iter().enumerate() {
+            let mut encoded = crate::edid::EdidBlock::new_default();
+            encoded
+                .write_detailed_checked(0, timing)
+                .map_err(|source| ExtensionWriteError::CtaDtdInvalid { index, source })?;
+            let start = dtd_offset + index * DTD_SIZE;
+            block.raw[start..start + DTD_SIZE].copy_from_slice(&encoded.raw[54..54 + DTD_SIZE]);
+        }
         block.update_checksum();
         Ok(block)
+    }
+
+    /// Construct a CTA-861 extension containing only a data-block collection.
+    pub fn from_cta_data_blocks(
+        revision: u8,
+        blocks: &[CtaDataBlock],
+    ) -> Result<Self, ExtensionWriteError> {
+        Self::from_cta_data_blocks_and_timings(revision, blocks, &[])
     }
 
     /// Read and validate the DisplayID base-section header.
@@ -1932,6 +1981,30 @@ mod tests {
         let block = EdidBlock::from_cta_data_blocks(3, &[]).unwrap();
         assert_eq!(&block.raw[4..127], &[0; 123]);
         assert!(block.cta_detailed_timings_flagged().unwrap().is_empty());
+    }
+
+    #[test]
+    fn constructs_cta_block_with_detailed_timings_and_native_count() {
+        let timing = crate::timing::all_presets()[0].clone();
+        let block = EdidBlock::from_cta_data_blocks_and_timings(3, &[], &[timing]).unwrap();
+        assert_eq!(block.raw[2], 4);
+        assert_eq!(block.raw[3] & 0x0F, 1);
+        assert_eq!(block.cta_detailed_timings().unwrap().len(), 1);
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_cta_dtds_without_space() {
+        let timings = (0..7)
+            .map(|_| crate::timing::all_presets()[0].clone())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            EdidBlock::from_cta_data_blocks_and_timings(3, &[], &timings),
+            Err(ExtensionWriteError::CtaDtdsTooLong {
+                count: 7,
+                maximum: 6
+            })
+        ));
     }
 
     #[test]
