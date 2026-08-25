@@ -1066,7 +1066,9 @@ impl EdidBlock {
             });
         }
 
-        let mut block = Self::new_default();
+        let mut block = Self {
+            raw: [0; crate::edid::EDID_BLOCK_SIZE],
+        };
         block.raw[0] = 0x02;
         block.raw[1] = revision;
         block.raw[2] = (DATA_BLOCK_OFFSET + collection.len()) as u8;
@@ -1923,6 +1925,13 @@ mod tests {
         assert_eq!(block.raw[2], 7);
         assert_eq!(block.cta_data_blocks().unwrap(), blocks);
         assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn cta_constructor_zeroes_padding_and_dtd_area() {
+        let block = EdidBlock::from_cta_data_blocks(3, &[]).unwrap();
+        assert_eq!(&block.raw[4..127], &[0; 123]);
+        assert!(block.cta_detailed_timings_flagged().unwrap().is_empty());
     }
 
     #[test]
