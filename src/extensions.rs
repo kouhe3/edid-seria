@@ -2506,6 +2506,43 @@ mod tests {
     }
 
     #[test]
+    fn typed_cta_encoders_roundtrip_through_views() {
+        let views = [
+            CtaDataBlockView::Video {
+                modes: vec![CtaVideoMode {
+                    vic: 16,
+                    native: true,
+                }],
+            },
+            CtaDataBlockView::Audio {
+                descriptors: vec![CtaAudioDescriptor {
+                    format: 1,
+                    channels: 2,
+                    sample_rates: 0x07,
+                    format_specific: 0x10,
+                }],
+            },
+            CtaDataBlockView::SpeakerAllocation(CtaSpeakerAllocation {
+                raw_mask: [0x07, 0x05, 0x01],
+            }),
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Colorimetry(CtaColorimetry {
+                xvycc601: true,
+                xvycc709: false,
+                sycc601: true,
+                adobe_ycc601: false,
+                adobe_rgb: true,
+                bt2020_cycc: false,
+                bt2020_ycc: true,
+                bt2020_rgb: true,
+                md_flags: 2,
+            })),
+        ];
+        for view in views {
+            let encoded = view.to_data_block().unwrap();
+            assert_eq!(encoded.view().unwrap(), view);
+        }
+    }
+    #[test]
     fn rejects_unrepresentable_cta_typed_view_fields() {
         assert!(matches!(
             (CtaDataBlockView::Video {
