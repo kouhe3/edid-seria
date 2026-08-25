@@ -530,6 +530,25 @@ pub enum ExtensionWriteError {
         /// Maximum value.
         maximum: u8,
     },
+    /// A known CTA vendor-specific block has a different OUI than its typed variant.
+    InvalidCtaVendorOui {
+        /// Expected OUI in little-endian byte order.
+        expected: [u8; 3],
+        /// OUI found in the raw payload.
+        actual: [u8; 3],
+    },
+    /// A vendor-specific TMDS rate is not representable in its five-MHz byte field.
+    InvalidCtaVendorRate {
+        /// Typed field name.
+        field: &'static str,
+        /// Supplied rate in MHz.
+        value: u16,
+    },
+    /// A typed vendor-specific field cannot be represented by the raw payload shape.
+    InvalidCtaVendorField {
+        /// Typed field name.
+        field: &'static str,
+    },
     /// A typed CTA variant does not yet expose enough fields for safe encoding.
     UnsupportedCtaTypedEncoding {
         /// Variant name.
@@ -613,6 +632,20 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "CTA extended payload length {length} has tag {actual_tag:?}, expected {expected_tag}"
             ),
+            Self::InvalidCtaVendorOui { expected, actual } => write!(
+                f,
+                "CTA vendor OUI {actual:02X?} does not match expected {expected:02X?}"
+            ),
+            Self::InvalidCtaVendorRate { field, value } => write!(
+                f,
+                "CTA vendor field {field} rate {value} MHz is not representable in 5-MHz units"
+            ),
+            Self::InvalidCtaVendorField { field } => {
+                write!(
+                    f,
+                    "CTA vendor field {field} is not representable by the raw payload"
+                )
+            }
             Self::InvalidCtaHdrLuminanceOrder => {
                 f.write_str("CTA HDR luminance fields must be a contiguous prefix")
             }
@@ -648,6 +681,103 @@ impl std::fmt::Display for ExtensionWriteError {
     }
 }
 
+fn vendor_payload_template(
+    raw: &[u8],
+    expected_oui: [u8; 3],
+) -> Result<Vec<u8>, ExtensionWriteError> {
+    if raw.len() < 3 {
+        return Err(ExtensionWriteError::CtaPayloadTooShort {
+            tag: 3,
+            length: raw.len(),
+            minimum: 3,
+        });
+    }
+    let actual_oui = [raw[0], raw[1], raw[2]];
+    if actual_oui != expected_oui {
+        return Err(ExtensionWriteError::InvalidCtaVendorOui {
+            expected: expected_oui,
+            actual: actual_oui,
+        });
+    }
+    Ok(raw.to_vec())
+}
+
+fn write_vendor_byte(
+    payload: &mut [u8],
+    raw: &[u8],
+    offset: usize,
+    value: u8,
+    default: u8,
+) -> Result<(), ExtensionWriteError> {
+    if raw.get(offset).copied().unwrap_or(default) != value {
+        if raw.len() <= offset {
+            return Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 3,
+                length: raw.len(),
+                minimum: offset + 1,
+            });
+        }
+        payload[offset] = value;
+    }
+    Ok(())
+}
+
+fn write_vendor_optional_byte(
+    payload: &mut [u8],
+    raw: &[u8],
+    offset: usize,
+    value: Option<u8>,
+    field: &'static str,
+) -> Result<(), ExtensionWriteError> {
+    if value.is_none() && raw.get(offset).is_some() {
+        return Err(ExtensionWriteError::InvalidCtaVendorField { field });
+    }
+    if raw.get(offset).copied() != value {
+        if raw.len() <= offset {
+            return Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 3,
+                length: raw.len(),
+                minimum: offset + 1,
+            });
+        }
+        payload[offset] = value.expect("a present value was checked above");
+    }
+    Ok(())
+}
+
+fn write_vendor_rate(
+    payload: &mut [u8],
+    raw: &[u8],
+    offset: usize,
+    value: Option<u16>,
+    field: &'static str,
+) -> Result<(), ExtensionWriteError> {
+    let encoded = match value {
+        None => 0,
+        Some(rate) if rate != 0 && rate % 5 == 0 && rate / 5 <= u16::from(u8::MAX) => {
+            (rate / 5) as u8
+        }
+        Some(rate) => {
+            return Err(ExtensionWriteError::InvalidCtaVendorRate { field, value: rate });
+        }
+    };
+    let decoded = raw
+        .get(offset)
+        .copied()
+        .filter(|&byte| byte != 0)
+        .map(|byte| u16::from(byte) * 5);
+    if value != decoded {
+        if raw.len() <= offset {
+            return Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 3,
+                length: raw.len(),
+                minimum: offset + 1,
+            });
+        }
+        payload[offset] = encoded;
+    }
+    Ok(())
+}
 impl CtaDataBlockView {
     /// Encode a typed CTA view without discarding fields represented by the view.
     pub fn to_data_block(&self) -> Result<CtaDataBlock, ExtensionWriteError> {
@@ -741,6 +871,78 @@ impl CtaDataBlockView {
                     payload: raw.clone(),
                 })
             }
+            Self::VendorSpecific(CtaVendorSpecificBlock::Hdmi14b {
+                physical_address,
+                max_tmds_clock_mhz,
+                deep_color_flags,
+                feature_flags,
+                raw,
+            }) => {
+                let mut payload = vendor_payload_template(raw, [0x03, 0x0C, 0x00])?;
+                write_vendor_byte(&mut payload, raw, 3, physical_address[0], 0)?;
+                write_vendor_byte(&mut payload, raw, 4, physical_address[1], 0)?;
+                write_vendor_rate(
+                    &mut payload,
+                    raw,
+                    6,
+                    *max_tmds_clock_mhz,
+                    "max_tmds_clock_mhz",
+                )?;
+                write_vendor_byte(&mut payload, raw, 5, *deep_color_flags, 0)?;
+                write_vendor_byte(&mut payload, raw, 7, *feature_flags, 0)?;
+                Ok(CtaDataBlock { tag: 3, payload })
+            }
+            Self::VendorSpecific(CtaVendorSpecificBlock::HdmiForum {
+                version,
+                max_tmds_character_rate_mhz,
+                scdc_flags,
+                deep_color_420_flags,
+                raw,
+            }) => {
+                let mut payload = vendor_payload_template(raw, [0xD8, 0x5D, 0xC4])?;
+                write_vendor_byte(&mut payload, raw, 3, *version, 1)?;
+                write_vendor_rate(
+                    &mut payload,
+                    raw,
+                    4,
+                    *max_tmds_character_rate_mhz,
+                    "max_tmds_character_rate_mhz",
+                )?;
+                write_vendor_byte(&mut payload, raw, 5, *scdc_flags, 0)?;
+                write_vendor_byte(&mut payload, raw, 7, *deep_color_420_flags, 0)?;
+                Ok(CtaDataBlock { tag: 3, payload })
+            }
+            Self::VendorSpecific(CtaVendorSpecificBlock::AmdFreeSync {
+                version,
+                min_refresh_hz,
+                max_refresh_hz,
+                flags,
+                raw,
+            }) => {
+                let mut payload = vendor_payload_template(raw, [0x1A, 0x00, 0x00])?;
+                write_vendor_byte(&mut payload, raw, 3, *version, 1)?;
+                write_vendor_optional_byte(
+                    &mut payload,
+                    raw,
+                    4,
+                    *min_refresh_hz,
+                    "min_refresh_hz",
+                )?;
+                write_vendor_optional_byte(
+                    &mut payload,
+                    raw,
+                    5,
+                    *max_refresh_hz,
+                    "max_refresh_hz",
+                )?;
+                write_vendor_byte(&mut payload, raw, 6, *flags, 0)?;
+                Ok(CtaDataBlock { tag: 3, payload })
+            }
+            Self::VendorSpecific(CtaVendorSpecificBlock::DolbyVision { version, raw }) => {
+                let mut payload = vendor_payload_template(raw, [0x46, 0xD0, 0x00])?;
+                write_vendor_byte(&mut payload, raw, 3, *version, 0)?;
+                Ok(CtaDataBlock { tag: 3, payload })
+            }
             Self::VendorSpecific(CtaVendorSpecificBlock::Other { oui, payload }) => {
                 let mut encoded = Vec::with_capacity(payload.len() + 3);
                 encoded.extend_from_slice(oui);
@@ -750,9 +952,6 @@ impl CtaDataBlockView {
                     payload: encoded,
                 })
             }
-            Self::VendorSpecific(_) => Err(ExtensionWriteError::UnsupportedCtaTypedEncoding {
-                kind: "known vendor-specific block",
-            }),
             Self::Extended(CtaExtendedDataBlockView::VideoCapability(capability)) => {
                 for (field, value) in [
                     ("PT", capability.pt_behavior),
@@ -806,16 +1005,20 @@ impl CtaDataBlockView {
                 min_luminance,
                 raw,
             }) => {
+                if raw.len() < 3 || raw.first() != Some(&0x06) {
+                    return Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                        expected_tag: 0x06,
+                        actual_tag: raw.first().copied(),
+                        length: raw.len(),
+                    });
+                }
                 if max_luminance.is_none()
                     && (max_frame_average_luminance.is_some() || min_luminance.is_some())
                     || max_frame_average_luminance.is_none() && min_luminance.is_some()
                 {
                     return Err(ExtensionWriteError::InvalidCtaHdrLuminanceOrder);
                 }
-                let known_length = 3
-                    + usize::from(max_luminance.is_some())
-                    + usize::from(max_frame_average_luminance.is_some())
-                    + usize::from(min_luminance.is_some());
+                let raw_prefix_length = raw.len().min(6);
                 let mut payload = vec![0x06, *eotf_flags, *metadata_descriptor_flags];
                 if let Some(value) = max_luminance {
                     payload.push(*value);
@@ -826,8 +1029,8 @@ impl CtaDataBlockView {
                 if let Some(value) = min_luminance {
                     payload.push(*value);
                 }
-                if raw.len() > known_length && raw.first() == Some(&0x06) {
-                    payload.extend_from_slice(&raw[known_length..]);
+                if raw.len() > raw_prefix_length {
+                    payload.extend_from_slice(&raw[raw_prefix_length..]);
                 }
                 Ok(CtaDataBlock { tag: 7, payload })
             }
@@ -2643,6 +2846,198 @@ mod tests {
         }
     }
     #[test]
+    fn encodes_known_vendor_views_losslessly_and_writes_typed_fields() {
+        let source_blocks = [
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0x03, 0x0C, 0x00, 0x10, 0x00, 0x38, 0x3C, 0x20, 0xAA],
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0xD8, 0x5D, 0xC4, 1, 0x78, 0xDC, 0x00, 0x01, 0xBB],
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0x1A, 0x00, 0x00, 1, 48, 144, 1, 0xCC],
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0x46, 0xD0, 0x00, 2, 0x11, 0x22, 0xDD],
+            },
+        ];
+        for source in &source_blocks {
+            let view = source.view().unwrap();
+            assert_eq!(view.to_data_block().unwrap(), source.clone());
+        }
+
+        let mut hdmi14b = match source_blocks[0].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::Hdmi14b {
+            physical_address,
+            max_tmds_clock_mhz,
+            deep_color_flags,
+            feature_flags,
+            ..
+        } = &mut hdmi14b
+        {
+            *physical_address = [0x20, 0x01];
+            *max_tmds_clock_mhz = Some(400);
+            *deep_color_flags = 0x70;
+            *feature_flags = 0x40;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(hdmi14b)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(&encoded.payload[3..8], &[0x20, 0x01, 0x70, 0x50, 0x40]);
+
+        let mut forum = match source_blocks[1].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::HdmiForum {
+            version,
+            max_tmds_character_rate_mhz,
+            scdc_flags,
+            deep_color_420_flags,
+            ..
+        } = &mut forum
+        {
+            *version = 2;
+            *max_tmds_character_rate_mhz = Some(700);
+            *scdc_flags = 0xAA;
+            *deep_color_420_flags = 0x02;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(forum)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(&encoded.payload[3..8], &[2, 0x8C, 0xAA, 0x00, 0x02]);
+
+        let mut freesync = match source_blocks[2].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::AmdFreeSync {
+            version,
+            min_refresh_hz,
+            max_refresh_hz,
+            flags,
+            ..
+        } = &mut freesync
+        {
+            *version = 2;
+            *min_refresh_hz = Some(50);
+            *max_refresh_hz = Some(165);
+            *flags = 2;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(freesync)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(&encoded.payload[3..7], &[2, 50, 165, 2]);
+
+        let mut dolby = match source_blocks[3].view().unwrap() {
+            CtaDataBlockView::VendorSpecific(block) => block,
+            other => panic!("unexpected view: {other:?}"),
+        };
+        if let CtaVendorSpecificBlock::DolbyVision { version, .. } = &mut dolby {
+            *version = 3;
+        }
+        let encoded = CtaDataBlockView::VendorSpecific(dolby)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(encoded.payload, vec![0x46, 0xD0, 0x00, 3, 0x11, 0x22, 0xDD]);
+    }
+    #[test]
+    fn validates_hdr_raw_prefix_and_drops_removed_luminance_bytes() {
+        let malformed = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0,
+            metadata_descriptor_flags: 0,
+            max_luminance: None,
+            max_frame_average_luminance: None,
+            min_luminance: None,
+            raw: vec![0x05, 0x01, 0x02],
+        });
+        assert!(matches!(
+            malformed.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x06,
+                actual_tag: Some(0x05),
+                length: 3
+            })
+        ));
+
+        let removed = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0x07,
+            metadata_descriptor_flags: 0x01,
+            max_luminance: None,
+            max_frame_average_luminance: Some(0x20),
+            min_luminance: Some(0x01),
+            raw: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+        });
+        assert!(matches!(
+            removed.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaHdrLuminanceOrder)
+        ));
+
+        let retained = CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrStaticMetadata {
+            eotf_flags: 0x07,
+            metadata_descriptor_flags: 0x01,
+            max_luminance: None,
+            max_frame_average_luminance: None,
+            min_luminance: None,
+            raw: vec![0x06, 0x07, 0x01, 0x40, 0x20, 0x01, 0xAA],
+        });
+        assert_eq!(
+            retained.to_data_block().unwrap().payload,
+            vec![0x06, 0x07, 0x01, 0xAA]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_known_vendor_encoder_inputs() {
+        let short = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::Hdmi14b {
+            physical_address: [1, 0],
+            max_tmds_clock_mhz: None,
+            deep_color_flags: 0,
+            feature_flags: 0,
+            raw: vec![0x03, 0x0C, 0x00],
+        });
+        assert!(matches!(
+            short.to_data_block(),
+            Err(ExtensionWriteError::CtaPayloadTooShort {
+                tag: 3,
+                length: 3,
+                minimum: 4
+            })
+        ));
+
+        let wrong_oui = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::DolbyVision {
+            version: 2,
+            raw: vec![0x03, 0x0C, 0x00, 2],
+        });
+        assert!(matches!(
+            wrong_oui.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaVendorOui { .. })
+        ));
+
+        let invalid_rate = CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::HdmiForum {
+            version: 1,
+            max_tmds_character_rate_mhz: Some(701),
+            scdc_flags: 0,
+            deep_color_420_flags: 0,
+            raw: vec![0xD8, 0x5D, 0xC4, 1, 0, 0, 0, 0],
+        });
+        assert!(matches!(
+            invalid_rate.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaVendorRate {
+                field: "max_tmds_character_rate_mhz",
+                value: 701
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_unrepresentable_cta_typed_view_fields() {
         assert!(matches!(
             (CtaDataBlockView::Video {
@@ -2736,7 +3131,11 @@ mod tests {
                 raw: vec![],
             })
             .to_data_block(),
-            Err(ExtensionWriteError::InvalidCtaHdrLuminanceOrder)
+            Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                expected_tag: 0x06,
+                actual_tag: None,
+                length: 0
+            })
         ));
     }
 
