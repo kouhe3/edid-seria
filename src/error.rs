@@ -59,13 +59,17 @@ pub enum MetadataError {
         /// Supplied absolute year.
         year: u16,
     },
+    /// Manufacture week uses a reserved EDID encoding.
+    InvalidManufactureWeek {
+        /// Supplied EDID manufacture-week byte.
+        week: u8,
+    },
     /// Gamma is outside the EDID representable range, in hundredths.
     InvalidGamma {
         /// Supplied gamma multiplied by 100.
         value: u16,
     },
 }
-
 impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -79,6 +83,9 @@ impl fmt::Display for MetadataError {
             }
             Self::InvalidManufactureYear { year } => {
                 write!(f, "manufacture year {year} is outside the EDID range")
+            }
+            Self::InvalidManufactureWeek { week } => {
+                write!(f, "manufacture week {week} uses a reserved EDID encoding")
             }
             Self::InvalidGamma { value } => {
                 write!(f, "gamma value {value} is outside the EDID range")

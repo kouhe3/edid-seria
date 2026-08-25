@@ -366,6 +366,11 @@ impl BaseMetadata {
                 year: self.manufacture_year,
             });
         }
+        if !matches!(self.manufacture_week, 0..=54 | 255) {
+            return Err(MetadataError::InvalidManufactureWeek {
+                week: self.manufacture_week,
+            });
+        }
         if let Some(gamma) = self.gamma
             && !(101..=355).contains(&gamma)
         {
@@ -1045,10 +1050,15 @@ impl EdidBlock {
     /// Construct a valid default base block populated with identity metadata.
     pub fn from_metadata(metadata: &BaseMetadata) -> Result<Self, MetadataError> {
         let mut block = Self::new_default();
+        block.raw[38..54].fill(0x01);
+        for slot in 0..4 {
+            let offset = 54 + slot * 18;
+            block.raw[offset..offset + 18].fill(0);
+            block.raw[offset + 3] = 0x10;
+        }
         block.set_metadata(metadata)?;
         Ok(block)
     }
-
     /// Decode the four 10-bit chromaticity points from the base block.
     pub fn chromaticity(&self) -> Result<ChromaticityCoordinates, MetadataError> {
         if self.raw[..8] != EDID_HEADER {
@@ -1476,6 +1486,52 @@ mod tests {
 
         let block = EdidBlock::from_metadata(&metadata).unwrap();
         assert_eq!(block.metadata().unwrap(), metadata);
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_reserved_manufacture_week() {
+        let metadata = BaseMetadata {
+            manufacturer_id: "ABC".to_owned(),
+            product_code: 1,
+            serial_number: 1,
+            manufacture_week: 55,
+            manufacture_year: 2024,
+            input: 0x80,
+            horizontal_size_cm: 1,
+            vertical_size_cm: 1,
+            gamma: None,
+            feature_flags: 0,
+        };
+
+        assert!(matches!(
+            EdidBlock::from_metadata(&metadata),
+            Err(MetadataError::InvalidManufactureWeek { week: 55 })
+        ));
+    }
+
+    #[test]
+    fn constructed_base_block_uses_edid_unused_markers() {
+        let metadata = BaseMetadata {
+            manufacturer_id: "ABC".to_owned(),
+            product_code: 1,
+            serial_number: 1,
+            manufacture_week: 0,
+            manufacture_year: 2024,
+            input: 0x80,
+            horizontal_size_cm: 1,
+            vertical_size_cm: 1,
+            gamma: None,
+            feature_flags: 0,
+        };
+
+        let block = EdidBlock::from_metadata(&metadata).unwrap();
+        let unused_timings = [0x01u8, 0x01].repeat(8);
+        assert_eq!(&block.raw[38..54], unused_timings.as_slice());
+        for slot in 0..4 {
+            let offset = 54 + slot * 18;
+            assert_eq!(block.raw[offset..offset + 4], [0, 0, 0, 0x10]);
+        }
         assert_eq!(block.validate(), Ok(()));
     }
 
