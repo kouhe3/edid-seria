@@ -457,7 +457,61 @@ pub enum DisplayIdDataBlockView {
     },
 }
 
+/// Errors returned while encoding EDID extension structures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExtensionWriteError {
+    /// CTA data-block tag does not fit its three-bit field.
+    InvalidCtaTag {
+        /// Supplied tag value.
+        tag: u8,
+    },
+    /// CTA data-block payload exceeds its five-bit length field.
+    CtaPayloadTooLong {
+        /// Supplied payload length.
+        length: usize,
+        /// Maximum representable payload length.
+        maximum: usize,
+    },
+}
+
+impl std::fmt::Display for ExtensionWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCtaTag { tag } => {
+                write!(f, "CTA data-block tag {tag} exceeds the three-bit field")
+            }
+            Self::CtaPayloadTooLong { length, maximum } => write!(
+                f,
+                "CTA data-block payload length {length} exceeds the {maximum}-byte maximum"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExtensionWriteError {}
+
 impl CtaDataBlock {
+    /// Encode this block as a CTA data-block header followed by its payload.
+    pub fn encode(&self) -> Result<Vec<u8>, ExtensionWriteError> {
+        const MAX_PAYLOAD_LENGTH: usize = 0x1F;
+
+        if self.tag > 0x07 {
+            return Err(ExtensionWriteError::InvalidCtaTag { tag: self.tag });
+        }
+        if self.payload.len() > MAX_PAYLOAD_LENGTH {
+            return Err(ExtensionWriteError::CtaPayloadTooLong {
+                length: self.payload.len(),
+                maximum: MAX_PAYLOAD_LENGTH,
+            });
+        }
+
+        let mut encoded = Vec::with_capacity(self.payload.len() + 1);
+        encoded.push((self.tag << 5) | self.payload.len() as u8);
+        encoded.extend_from_slice(&self.payload);
+        Ok(encoded)
+    }
+
     /// Decode this data block into a typed read-only view.
     pub fn view(&self) -> Result<CtaDataBlockView, ExtensionError> {
         match self.tag {
@@ -1164,7 +1218,7 @@ mod tests {
     use super::{
         CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock,
         CtaVideoMode, DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
-        DisplayIdHeader, ExtensionError, ExtensionKind,
+        DisplayIdHeader, ExtensionError, ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -1815,5 +1869,37 @@ mod tests {
             }
             other => panic!("expected DolbyVision, got {other:?}"),
         }
+    }
+    #[test]
+    fn encodes_raw_cta_data_block_header_and_payload() {
+        let block = CtaDataBlock {
+            tag: 2,
+            payload: vec![16, 31],
+        };
+        assert_eq!(block.encode().unwrap(), vec![0x42, 16, 31]);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_raw_cta_data_block() {
+        let invalid_tag = CtaDataBlock {
+            tag: 8,
+            payload: Vec::new(),
+        };
+        assert!(matches!(
+            invalid_tag.encode(),
+            Err(ExtensionWriteError::InvalidCtaTag { tag: 8 })
+        ));
+
+        let oversized = CtaDataBlock {
+            tag: 2,
+            payload: vec![0; 32],
+        };
+        assert!(matches!(
+            oversized.encode(),
+            Err(ExtensionWriteError::CtaPayloadTooLong {
+                length: 32,
+                maximum: 31
+            })
+        ));
     }
 }
