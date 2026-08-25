@@ -44,4 +44,30 @@ fuzz_target!(|data: &[u8]| {
 
     // 3. Fuzz resolution serializer with arbitrary existing binary
     let _ = serialize_resolutions(Some(data), &[]);
+    // 4. Fuzz raw extension constructors and mutation paths.
+    let cta_payload = data.iter().copied().take(31).collect::<Vec<_>>();
+    let cta = CtaDataBlock {
+        tag: data.first().copied().unwrap_or(0) & 0x07,
+        payload: cta_payload,
+    };
+    if let Ok(mut block) = EdidBlock::from_cta_data_blocks(3, &[cta]) {
+        let _ = block.replace_cta_data_blocks(&[]);
+    }
+    let display_payload = data.iter().copied().take(64).collect::<Vec<_>>();
+    let display = DisplayIdDataBlock {
+        tag: data.first().copied().unwrap_or(0),
+        revision: data.get(1).copied().unwrap_or(0),
+        payload: display_payload,
+    };
+    if let Ok(mut block) = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &[display]) {
+        let _ = block.replace_display_id_data_blocks(&[]);
+    }
+
+    if let Ok(mut edid) = Edid::from_bytes(data) {
+        if let Some(extension) = edid.extensions.first().cloned() {
+            let _ = edid.replace_extension(0, extension);
+        }
+        let _ = edid.to_bytes_checked();
+    }
+    let _ = serialize_resolutions(Some(data), &[]);
 });
