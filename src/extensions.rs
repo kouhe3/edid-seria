@@ -494,6 +494,13 @@ pub enum ExtensionWriteError {
         /// Underlying DTD validation error.
         source: crate::error::DtdError,
     },
+    /// The DisplayID data-block payload cannot fit in one extension.
+    DisplayIdPayloadTooLong {
+        /// Encoded payload length.
+        length: usize,
+        /// Maximum payload length.
+        maximum: usize,
+    },
     /// The target block is not a CTA-861 extension.
     NotCta861,
 }
@@ -521,8 +528,28 @@ impl std::fmt::Display for ExtensionWriteError {
             Self::CtaDtdInvalid { index, source } => {
                 write!(f, "CTA DTD {index} is invalid: {source}")
             }
+            Self::DisplayIdPayloadTooLong { length, maximum } => write!(
+                f,
+                "DisplayID payload length {length} exceeds the {maximum}-byte maximum"
+            ),
             Self::NotCta861 => f.write_str("block is not a CTA-861 extension"),
         }
+    }
+}
+
+impl DisplayIdDataBlock {
+    /// Encode this DisplayID data block with its three-byte header.
+    pub fn encode(&self) -> Result<Vec<u8>, ExtensionWriteError> {
+        if self.payload.len() > u8::MAX as usize {
+            return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                length: self.payload.len(),
+                maximum: u8::MAX as usize,
+            });
+        }
+        let mut encoded = Vec::with_capacity(self.payload.len() + 3);
+        encoded.extend_from_slice(&[self.tag, self.revision, self.payload.len() as u8]);
+        encoded.extend_from_slice(&self.payload);
+        Ok(encoded)
     }
 }
 
@@ -1138,6 +1165,45 @@ impl EdidBlock {
         Ok(())
     }
 
+    /// Construct a DisplayID extension containing raw data blocks.
+    pub fn from_display_id_data_blocks(
+        revision: u8,
+        product_type_or_primary_use: u8,
+        extension_count: u8,
+        blocks: &[DisplayIdDataBlock],
+    ) -> Result<Self, ExtensionWriteError> {
+        const DATA_OFFSET: usize = 5;
+        const MAX_PAYLOAD: usize = 121;
+
+        let mut payload = Vec::new();
+        for data_block in blocks {
+            payload.extend_from_slice(&data_block.encode()?);
+        }
+        if payload.len() > MAX_PAYLOAD {
+            return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                length: payload.len(),
+                maximum: MAX_PAYLOAD,
+            });
+        }
+
+        let mut block = Self {
+            raw: [0; crate::edid::EDID_BLOCK_SIZE],
+        };
+        block.raw[0] = 0x70;
+        block.raw[1] = revision;
+        block.raw[2] = payload.len() as u8;
+        block.raw[3] = product_type_or_primary_use;
+        block.raw[4] = extension_count;
+        block.raw[DATA_OFFSET..DATA_OFFSET + payload.len()].copy_from_slice(&payload);
+        let section_checksum = DATA_OFFSET + payload.len();
+        let sum = block.raw[1..section_checksum]
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+        block.raw[section_checksum] = 0u8.wrapping_sub(sum);
+        block.update_checksum();
+        Ok(block)
+    }
+
     /// Construct a CTA-861 extension containing only a data-block collection.
     pub fn from_cta_data_blocks(
         revision: u8,
@@ -1326,8 +1392,9 @@ fn parse_cta_data_blocks(
 mod tests {
     use super::{
         CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView, CtaVendorSpecificBlock,
-        CtaVideoMode, DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
-        DisplayIdHeader, ExtensionError, ExtensionKind, ExtensionWriteError,
+        CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
+        DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
+        ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -2092,6 +2159,36 @@ mod tests {
             Err(ExtensionWriteError::CtaPayloadTooLong {
                 length: 32,
                 maximum: 31
+            })
+        ));
+    }
+
+    #[test]
+    fn constructs_display_id_from_data_blocks() {
+        let blocks = [DisplayIdDataBlock {
+            tag: 0x55,
+            revision: 1,
+            payload: vec![0xAA, 0xBB],
+        }];
+        let block = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &blocks).unwrap();
+        assert_eq!(block.raw[0], 0x70);
+        assert_eq!(block.raw[1], 0x20);
+        assert_eq!(block.display_id_data_blocks().unwrap(), blocks);
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_display_id_payload_over_121_bytes() {
+        let blocks = [DisplayIdDataBlock {
+            tag: 1,
+            revision: 0,
+            payload: vec![0; 119],
+        }];
+        assert!(matches!(
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &blocks),
+            Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                length: 122,
+                maximum: 121
             })
         ));
     }
