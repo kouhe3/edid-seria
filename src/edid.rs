@@ -520,6 +520,19 @@ impl Edid {
         }
         bytes
     }
+    /// Validate this EDID before a checked serialization.
+    pub fn validate_for_serialization(&self) -> Result<(), EdidError> {
+        self.validate()
+    }
+
+    /// Validate and return the complete EDID as contiguous bytes.
+    ///
+    /// Unlike [`Self::to_bytes`], this method checks the base block, extension
+    /// count, and every extension checksum before producing output.
+    pub fn to_bytes_checked(&self) -> Result<Vec<u8>, EdidError> {
+        self.validate_for_serialization()?;
+        Ok(self.to_bytes())
+    }
 
     /// Validate the base block and every extension block.
     pub fn validate(&self) -> Result<(), EdidError> {
@@ -835,6 +848,48 @@ mod tests {
         assert_eq!(edid.extensions.len(), 1);
         assert_eq!(edid.extensions[0].raw[0], 0x02);
         assert_eq!(edid.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn checked_output_preserves_valid_edid_bytes() {
+        let mut base = EdidBlock::new_default();
+        let mut extension = EdidBlock::new_default();
+        extension.raw[0] = 0x02;
+        extension.raw[1] = 0x03;
+        extension.update_checksum();
+        base.raw[126] = 1;
+        base.update_checksum();
+
+        let mut bytes = base.as_bytes().to_vec();
+        bytes.extend_from_slice(extension.as_bytes());
+        let edid = Edid::from_bytes(&bytes).unwrap();
+
+        assert_eq!(edid.to_bytes_checked().unwrap(), bytes);
+    }
+
+    #[test]
+    fn checked_output_rejects_invalid_aggregate_state() {
+        let mut invalid_checksum = Edid {
+            base: EdidBlock::new_default(),
+            extensions: Vec::new(),
+        };
+        invalid_checksum.base.raw[10] ^= 1;
+        assert!(matches!(
+            invalid_checksum.to_bytes_checked(),
+            Err(EdidError::InvalidChecksum { .. })
+        ));
+
+        let invalid_count = Edid {
+            base: EdidBlock::new_default(),
+            extensions: vec![EdidBlock::new_default()],
+        };
+        assert!(matches!(
+            invalid_count.to_bytes_checked(),
+            Err(EdidError::ExtensionCountMismatch {
+                declared: 0,
+                actual: 1
+            })
+        ));
     }
 
     #[test]

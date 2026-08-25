@@ -240,6 +240,7 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
         .fold(0u8, |acc, &b| acc.wrapping_add(b));
     edid_1080p[127] = (0u8).wrapping_sub(sum);
     let parsed = Edid::from_bytes(&edid_1080p).expect("valid 1080p EDID must parse");
+    assert_eq!(parsed.to_bytes(), edid_1080p);
     assert_eq!(parsed.extensions.len(), 0);
     assert_eq!(parsed.base.validate(), Ok(()));
     let decoded_timing = parsed.base.read_detailed(0).unwrap();
@@ -266,6 +267,7 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
     multi_edid[255] = (0u8).wrapping_sub(cta_sum);
 
     let parsed_multi = Edid::from_bytes(&multi_edid).expect("multi-block EDID must parse");
+    assert_eq!(parsed_multi.to_bytes(), multi_edid);
     assert_eq!(parsed_multi.extensions.len(), 1);
     assert_eq!(parsed_multi.base.validate(), Ok(()));
     assert_eq!(parsed_multi.extensions[0].validate(), Ok(()));
@@ -313,6 +315,7 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
 
     let parsed_dispid =
         Edid::from_bytes(&displayid_edid).expect("DisplayID multi-block must parse");
+    assert_eq!(parsed_dispid.to_bytes(), displayid_edid);
     assert_eq!(parsed_dispid.extensions.len(), 1);
     assert_eq!(
         parsed_dispid.extensions[0]
