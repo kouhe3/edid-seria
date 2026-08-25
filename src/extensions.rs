@@ -473,6 +473,13 @@ pub enum ExtensionWriteError {
         /// Maximum representable payload length.
         maximum: usize,
     },
+    /// The complete CTA data-block collection does not fit before byte 127.
+    CtaDataBlocksTooLong {
+        /// Supplied collection length.
+        length: usize,
+        /// Maximum collection length.
+        maximum: usize,
+    },
 }
 
 impl std::fmt::Display for ExtensionWriteError {
@@ -484,6 +491,10 @@ impl std::fmt::Display for ExtensionWriteError {
             Self::CtaPayloadTooLong { length, maximum } => write!(
                 f,
                 "CTA data-block payload length {length} exceeds the {maximum}-byte maximum"
+            ),
+            Self::CtaDataBlocksTooLong { length, maximum } => write!(
+                f,
+                "CTA data-block collection length {length} exceeds the {maximum}-byte maximum"
             ),
         }
     }
@@ -1035,6 +1046,35 @@ impl EdidBlock {
             },
             tag => ExtensionKind::Unknown { tag },
         }
+    }
+    /// Construct a CTA-861 extension containing only a data-block collection.
+    pub fn from_cta_data_blocks(
+        revision: u8,
+        blocks: &[CtaDataBlock],
+    ) -> Result<Self, ExtensionWriteError> {
+        const DATA_BLOCK_OFFSET: usize = 4;
+        const MAX_COLLECTION_LENGTH: usize = 123;
+
+        let mut collection = Vec::new();
+        for block in blocks {
+            collection.extend_from_slice(&block.encode()?);
+        }
+        if collection.len() > MAX_COLLECTION_LENGTH {
+            return Err(ExtensionWriteError::CtaDataBlocksTooLong {
+                length: collection.len(),
+                maximum: MAX_COLLECTION_LENGTH,
+            });
+        }
+
+        let mut block = Self::new_default();
+        block.raw[0] = 0x02;
+        block.raw[1] = revision;
+        block.raw[2] = (DATA_BLOCK_OFFSET + collection.len()) as u8;
+        block.raw[3] = 0;
+        block.raw[DATA_BLOCK_OFFSET..DATA_BLOCK_OFFSET + collection.len()]
+            .copy_from_slice(&collection);
+        block.update_checksum();
+        Ok(block)
     }
 
     /// Read and validate the DisplayID base-section header.
@@ -1869,6 +1909,38 @@ mod tests {
             }
             other => panic!("expected DolbyVision, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn constructs_cta_block_from_data_blocks() {
+        let blocks = [CtaDataBlock {
+            tag: 2,
+            payload: vec![16, 31],
+        }];
+        let block = EdidBlock::from_cta_data_blocks(3, &blocks).unwrap();
+        assert_eq!(block.raw[0], 0x02);
+        assert_eq!(block.raw[1], 3);
+        assert_eq!(block.raw[2], 7);
+        assert_eq!(block.cta_data_blocks().unwrap(), blocks);
+        assert_eq!(block.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_cta_data_collection_that_cannot_fit() {
+        let blocks = vec![
+            CtaDataBlock {
+                tag: 2,
+                payload: vec![0; 31],
+            };
+            4
+        ];
+        assert!(matches!(
+            EdidBlock::from_cta_data_blocks(3, &blocks),
+            Err(ExtensionWriteError::CtaDataBlocksTooLong {
+                length: 128,
+                maximum: 123
+            })
+        ));
     }
     #[test]
     fn encodes_raw_cta_data_block_header_and_payload() {
