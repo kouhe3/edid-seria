@@ -138,6 +138,10 @@ fn parse_existing_blocks(existing: Option<&[u8]>) -> Result<Vec<EdidBlock>, Seri
             block
                 .validate_base()
                 .map_err(|source| SerializeError::InvalidExistingBlock { index, source })?;
+        } else {
+            block
+                .validate_extension()
+                .map_err(|source| SerializeError::InvalidExistingBlock { index, source })?;
         }
         blocks.push(block);
     }

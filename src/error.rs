@@ -4,7 +4,6 @@ use std::fmt;
 
 /// Errors returned when an EDID block cannot be accepted by the strict parser.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum EdidError {
     /// The input is not exactly one complete EDID block.
     InvalidLength {
@@ -55,7 +54,6 @@ pub enum EdidError {
 
 /// Errors returned while decoding or encoding base-block metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum MetadataError {
     /// The block does not contain the EDID base-block header.
     NotBaseBlock,

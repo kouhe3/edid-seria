@@ -117,8 +117,9 @@ impl EdidBlock {
     }
     /// Parse and validate exactly one EDID block.
     ///
-    /// Base blocks must contain the EDID header. Extension blocks are accepted
-    /// by their non-zero tag and are validated by checksum only.
+    /// This accepts either a base block or an extension block. Callers that
+    /// know the block is an extension must use [`Self::validate_extension`]
+    /// so a base block cannot be accepted in that position.
     pub fn from_bytes_checked(data: &[u8]) -> Result<Self, EdidError> {
         if data.len() != EDID_BLOCK_SIZE {
             return Err(EdidError::InvalidLength {
@@ -146,6 +147,17 @@ impl EdidBlock {
             return Err(EdidError::InvalidChecksum { sum });
         }
         Ok(())
+    }
+    /// Validate this block as an EDID extension.
+    ///
+    /// Extension blocks must have a non-zero tag. In particular, a complete
+    /// base block with the EDID header is not a valid extension, even though
+    /// it is accepted by [`Self::from_bytes_checked`] as a standalone block.
+    pub fn validate_extension(&self) -> Result<(), EdidError> {
+        if self.raw[0] == 0 {
+            return Err(EdidError::InvalidHeader);
+        }
+        self.validate()
     }
 
     /// Read a progressive detailed timing from slot (0-3).
@@ -511,7 +523,9 @@ impl Edid {
         let mut extensions = Vec::with_capacity(actual);
         let (extension_chunks, _) = data[EDID_BLOCK_SIZE..].as_chunks::<EDID_BLOCK_SIZE>();
         for chunk in extension_chunks {
-            extensions.push(EdidBlock::from_bytes_checked(chunk)?);
+            let extension = EdidBlock::from_bytes_checked(chunk)?;
+            extension.validate_extension()?;
+            extensions.push(extension);
         }
 
         Ok(Self { base, extensions })
@@ -550,7 +564,7 @@ impl Edid {
             return Err(EdidError::ExtensionCountMismatch { declared, actual });
         }
         for extension in &self.extensions {
-            extension.validate()?;
+            extension.validate_extension()?;
         }
         Ok(())
     }
@@ -566,7 +580,7 @@ impl Edid {
                 count: self.extensions.len(),
             });
         }
-        extension.validate()?;
+        extension.validate_extension()?;
         if self.extensions.len() >= u8::MAX as usize {
             return Err(EdidError::TooManyExtensions {
                 count: self.extensions.len() + 1,
@@ -584,7 +598,7 @@ impl Edid {
         index: usize,
         extension: EdidBlock,
     ) -> Result<(), EdidError> {
-        extension.validate()?;
+        extension.validate_extension()?;
         let Some(target) = self.extensions.get_mut(index) else {
             return Err(EdidError::ExtensionIndexOutOfRange {
                 index,
