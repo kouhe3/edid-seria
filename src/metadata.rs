@@ -1042,6 +1042,13 @@ impl MonitorDescriptor {
 }
 
 impl EdidBlock {
+    /// Construct a valid default base block populated with identity metadata.
+    pub fn from_metadata(metadata: &BaseMetadata) -> Result<Self, MetadataError> {
+        let mut block = Self::new_default();
+        block.set_metadata(metadata)?;
+        Ok(block)
+    }
+
     /// Decode the four 10-bit chromaticity points from the base block.
     pub fn chromaticity(&self) -> Result<ChromaticityCoordinates, MetadataError> {
         if self.raw[..8] != EDID_HEADER {
@@ -1450,6 +1457,26 @@ mod tests {
         };
         block.set_metadata(&metadata).unwrap();
         assert_eq!(block.metadata().unwrap(), metadata);
+    }
+
+    #[test]
+    fn constructs_base_block_from_metadata() {
+        let metadata = BaseMetadata {
+            manufacturer_id: "ABC".to_owned(),
+            product_code: 0x1234,
+            serial_number: 0x5678_9ABC,
+            manufacture_week: 25,
+            manufacture_year: 2024,
+            input: 0x80,
+            horizontal_size_cm: 60,
+            vertical_size_cm: 34,
+            gamma: Some(220),
+            feature_flags: 0x0A,
+        };
+
+        let block = EdidBlock::from_metadata(&metadata).unwrap();
+        assert_eq!(block.metadata().unwrap(), metadata);
+        assert_eq!(block.validate(), Ok(()));
     }
 
     #[test]
