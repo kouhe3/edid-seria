@@ -898,6 +898,37 @@ fn replace_cta_detailed_timings_preserves_data_blocks_with_zero_offset() {
 }
 
 #[test]
+fn bounded_cta_collection_preserves_reserved_empty_block_through_dtd_replacement() {
+    use edid_seria::{CtaDataBlock, EdidBlock};
+
+    let reserved = CtaDataBlock {
+        tag: 0,
+        payload: Vec::new(),
+    };
+    let mut block = EdidBlock::from_cta_data_blocks(3, std::slice::from_ref(&reserved)).unwrap();
+
+    assert_eq!(block.raw[2], 5);
+    assert_eq!(block.raw[4], 0);
+    let reparsed = EdidBlock::from_bytes_checked(block.as_bytes()).unwrap();
+    assert_eq!(reparsed.cta_data_blocks().unwrap(), vec![reserved.clone()]);
+
+    let timing = all_presets()[0].clone();
+    block
+        .replace_cta_detailed_timings(std::slice::from_ref(&timing))
+        .unwrap();
+    assert_eq!(block.cta_data_blocks().unwrap(), vec![reserved]);
+    assert_eq!(block.raw[2], 5);
+    assert_eq!(block.raw[4], 0);
+    assert_eq!(
+        block
+            .as_bytes()
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+        0
+    );
+}
+
+#[test]
 fn set_cta_header_rejects_malformed_layout_without_mutation() {
     use edid_seria::{CtaDataBlock, CtaHeader, ExtensionWriteError};
 

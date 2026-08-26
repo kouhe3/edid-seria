@@ -100,8 +100,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = block.display_id_header();
         if let Ok(did_blocks) = block.display_id_data_blocks() {
             for did in did_blocks {
-                // DisplayID currently has raw block encoding only; typed views
-                // are intentionally inspection APIs until typed encoders land.
+                // Exercise DisplayID typed views and raw encoders.
                 let _ = did.view();
                 let _ = did.encode();
             }

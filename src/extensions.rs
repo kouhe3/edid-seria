@@ -524,7 +524,7 @@ impl DisplayIdDataBlock {
             }),
             0x81 => {
                 let raw = self.payload.clone();
-                let data_blocks = parse_cta_data_blocks(&self.payload, 0)?;
+                let data_blocks = parse_cta_data_blocks(&self.payload, 0, false)?;
                 Ok(DisplayIdDataBlockView::Cta { data_blocks, raw })
             }
             tag => Ok(DisplayIdDataBlockView::Unknown {
@@ -1179,7 +1179,7 @@ impl EdidBlock {
         if !(4..=127).contains(&end) {
             return Err(ExtensionError::InvalidDtdOffset { offset: end });
         }
-        parse_cta_data_blocks(&self.raw[4..end], 4)
+        parse_cta_data_blocks(&self.raw[4..end], 4, dtd_offset == 0)
     }
 
     /// Read and validate the CTA-861 extension header and capability flags.
@@ -1361,14 +1361,15 @@ fn parse_display_id_data_blocks(
 fn parse_cta_data_blocks(
     data: &[u8],
     base_offset: usize,
+    stop_at_zero_padding: bool,
 ) -> Result<Vec<CtaDataBlock>, ExtensionError> {
     let mut blocks = Vec::new();
     let mut offset = 0;
     while offset < data.len() {
         let header = data[offset];
-        // A zero-filled remainder is padding, including an offset-zero
-        // collection; stop there without synthesizing empty data blocks.
-        if header == 0 && data[offset..].iter().all(|&byte| byte == 0) {
+        // Only an offset-zero collection has an unknown boundary where a
+        // zero-filled remainder can be treated as padding.
+        if stop_at_zero_padding && header == 0 && data[offset..].iter().all(|&byte| byte == 0) {
             break;
         }
         let tag = header >> 5;
