@@ -21,11 +21,15 @@ All notable changes to `edid-seria` are documented here.
 
 - CTA typed views can be encoded through `CtaDataBlockView::to_data_block()`;
   unknown and reserved payloads should use raw `CtaDataBlock` values. DisplayID
-  typed views remain inspection-only in this release; only raw
-  `DisplayIdDataBlock::encode()` and raw collection constructors write
-  DisplayID data.
-- CTA header/DTD mutation, general typed DisplayID editing, canonicalization
-  policies, and flag-policy variants remain deferred.
+  typed views also provide `to_data_block()` and
+  `to_data_block_with_tag()`. These encoders emit canonical tags and normalize
+  the encoded data-block revision to zero. Embedded CTA typed encoding
+  normalizes each nested typed block; representable raw tails are preserved by
+  the nested CTA encoder, while unsupported or non-representable tails may be
+  rejected rather than silently treated as lossless.
+- CTA header/DTD mutation and broader canonicalization policy controls remain
+  available only through their existing checked/raw boundaries; typed
+  DisplayID editing is no longer inspection-only.
 - The crate's MSRV is Rust 1.95 (edition 2024). Public enums are part of the
   API surface: adding variants can make downstream exhaustive `match`
   expressions fail to compile. Consumers should include a wildcard arm where

@@ -678,6 +678,76 @@ fn displayid_typed_encoder_roundtrips_view_and_bytes() {
 }
 
 #[test]
+fn displayid_typed_timing_encoder_rejects_empty_payload() {
+    use edid_seria::{DisplayIdDataBlockView, ExtensionWriteError};
+
+    let view = DisplayIdDataBlockView::DetailedTiming { timings: vec![] };
+    assert!(matches!(
+        view.to_data_block(),
+        Err(ExtensionWriteError::DisplayIdPayloadTooShort {
+            tag: 0x22,
+            length: 0,
+            minimum: 20,
+        })
+    ));
+    assert!(matches!(
+        view.to_data_block_with_tag(0x03),
+        Err(ExtensionWriteError::DisplayIdPayloadTooShort {
+            tag: 0x03,
+            length: 0,
+            minimum: 20,
+        })
+    ));
+}
+
+#[test]
+fn displayid_typed_timing_encoder_rejects_sync_offsets_that_overlap_polarity() {
+    use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, ExtensionWriteError};
+
+    let mut timing = DisplayIdDetailedTiming {
+        pixel_clock_khz: 14_850,
+        h_active: 1_920,
+        h_blank: 280,
+        h_sync_offset: 32_769,
+        h_sync_width: 44,
+        v_active: 1_080,
+        v_blank: 45,
+        v_sync_offset: 4,
+        v_sync_width: 5,
+        h_sync_positive: true,
+        v_sync_positive: false,
+        preferred: true,
+    };
+    let view = DisplayIdDataBlockView::DetailedTiming {
+        timings: vec![timing],
+    };
+    assert!(matches!(
+        view.to_data_block_with_tag(0x22),
+        Err(ExtensionWriteError::InvalidDisplayIdTimingField {
+            field: "h_sync_offset",
+            value: 32_769,
+            maximum: 32_768,
+            ..
+        })
+    ));
+
+    timing.h_sync_offset = 4;
+    timing.v_sync_offset = 32_769;
+    let view = DisplayIdDataBlockView::DetailedTiming {
+        timings: vec![timing],
+    };
+    assert!(matches!(
+        view.to_data_block_with_tag(0x22),
+        Err(ExtensionWriteError::InvalidDisplayIdTimingField {
+            field: "v_sync_offset",
+            value: 32_769,
+            maximum: 32_768,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn cta_header_and_dtd_mutations_update_checksum_and_are_atomic_on_failure() {
     use edid_seria::{CtaDataBlock, EdidBlock};
     let mut block = EdidBlock::from_cta_data_blocks(
@@ -732,4 +802,115 @@ fn cta_header_and_dtd_mutations_update_checksum_and_are_atomic_on_failure() {
     let too_many = vec![all_presets()[0].clone(); 7];
     assert!(block.replace_cta_detailed_timings(&too_many).is_err());
     assert_eq!(block, before_too_many_dtds);
+}
+
+#[test]
+fn replace_cta_detailed_timings_treats_zero_offset_as_empty_data_collection() {
+    let timing = all_presets()[0].clone();
+    let mut block = EdidBlock::from_cta_data_blocks(3, &[]).unwrap();
+    block.raw[2] = 0;
+    block.update_checksum();
+
+    let expected =
+        EdidBlock::from_cta_data_blocks_and_timings(3, &[], std::slice::from_ref(&timing)).unwrap();
+    block
+        .replace_cta_detailed_timings(std::slice::from_ref(&timing))
+        .unwrap();
+    assert_eq!(block.as_bytes(), expected.as_bytes());
+}
+
+#[test]
+fn set_cta_header_rejects_malformed_layout_without_mutation() {
+    use edid_seria::{CtaDataBlock, CtaHeader, ExtensionWriteError};
+
+    let mut block = EdidBlock::from_cta_data_blocks(
+        3,
+        &[CtaDataBlock {
+            tag: 2,
+            payload: vec![0x90],
+        }],
+    )
+    .unwrap();
+    block.raw[2] = 5;
+    block.update_checksum();
+    let before = block.as_bytes().to_vec();
+    let error = block
+        .set_cta_header(CtaHeader {
+            revision: 3,
+            dtd_offset: 5,
+            native_dtd_count: 0,
+            underscan: false,
+            basic_audio: false,
+            ycbcr_444: false,
+            ycbcr_422: false,
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ExtensionWriteError::InvalidCtaLayout { .. }
+    ));
+    assert_eq!(block.as_bytes(), before);
+}
+
+#[test]
+fn set_cta_header_rejects_native_count_above_populated_dtds_without_mutation() {
+    use edid_seria::{CtaHeader, ExtensionWriteError};
+
+    let timing = all_presets()[0].clone();
+    let mut block =
+        EdidBlock::from_cta_data_blocks_and_timings(3, &[], std::slice::from_ref(&timing)).unwrap();
+    let before = block.as_bytes().to_vec();
+    let error = block
+        .set_cta_header(CtaHeader {
+            revision: 3,
+            dtd_offset: 4,
+            native_dtd_count: 2,
+            underscan: false,
+            basic_audio: false,
+            ycbcr_444: false,
+            ycbcr_422: false,
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ExtensionWriteError::CtaDtdsTooLong {
+            count: 2,
+            maximum: 1,
+        }
+    ));
+    assert_eq!(block.as_bytes(), before);
+}
+
+#[test]
+fn malformed_cta_mutation_errors_are_not_reported_as_not_cta() {
+    use edid_seria::{CtaDataBlock, ExtensionWriteError};
+
+    let mut block = EdidBlock::from_cta_data_blocks(
+        3,
+        &[CtaDataBlock {
+            tag: 2,
+            payload: vec![0x90],
+        }],
+    )
+    .unwrap();
+    block.raw[2] = 5;
+    block.update_checksum();
+    let error = block
+        .set_cta_capabilities(true, false, false, false)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ExtensionWriteError::InvalidCtaLayout { .. }
+    ));
+
+    let before = block.as_bytes().to_vec();
+    let timing = all_presets()[0].clone();
+    let replace_error = block
+        .replace_cta_detailed_timings(std::slice::from_ref(&timing))
+        .unwrap_err();
+    assert!(matches!(
+        replace_error,
+        ExtensionWriteError::InvalidCtaLayout { .. }
+    ));
+    assert_eq!(block.as_bytes(), before);
 }
