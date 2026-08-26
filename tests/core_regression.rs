@@ -676,6 +676,49 @@ fn displayid_typed_encoder_roundtrips_view_and_bytes() {
         0
     );
 }
+#[test]
+fn displayid_type_vii_encoder_roundtrips_maximum_pixel_clock() {
+    use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, EdidBlock};
+
+    let timing = DisplayIdDetailedTiming {
+        pixel_clock_khz: 16_777_216,
+        h_active: 1,
+        h_blank: 1,
+        h_sync_offset: 1,
+        h_sync_width: 1,
+        v_active: 1,
+        v_blank: 1,
+        v_sync_offset: 1,
+        v_sync_width: 1,
+        h_sync_positive: false,
+        v_sync_positive: false,
+        preferred: false,
+    };
+    let view = DisplayIdDataBlockView::DetailedTiming {
+        timings: vec![timing],
+    };
+    let data_block = view.to_data_block().unwrap();
+    assert_eq!(data_block.tag, 0x22);
+    assert_eq!(&data_block.payload[..3], &[0xFF, 0xFF, 0xFF][..]);
+
+    let block =
+        EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&data_block))
+            .unwrap();
+    let parsed = block.display_id_data_blocks().unwrap();
+    assert_eq!(
+        parsed[0].view().unwrap(),
+        DisplayIdDataBlockView::DetailedTiming {
+            timings: vec![timing],
+        }
+    );
+    assert_eq!(
+        block
+            .as_bytes()
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+        0
+    );
+}
 
 #[test]
 fn displayid_typed_timing_encoder_rejects_empty_payload() {
@@ -817,6 +860,41 @@ fn replace_cta_detailed_timings_treats_zero_offset_as_empty_data_collection() {
         .replace_cta_detailed_timings(std::slice::from_ref(&timing))
         .unwrap();
     assert_eq!(block.as_bytes(), expected.as_bytes());
+}
+
+#[test]
+fn replace_cta_detailed_timings_preserves_data_blocks_with_zero_offset() {
+    use edid_seria::CtaDataBlock;
+
+    let timing = all_presets()[0].clone();
+    let data_block = CtaDataBlock {
+        tag: 2,
+        payload: vec![0x90],
+    };
+    let mut block = EdidBlock::from_cta_data_blocks(3, std::slice::from_ref(&data_block)).unwrap();
+    block.raw[2] = 0;
+    block.update_checksum();
+    let original_data_block_bytes = block.raw[4..6].to_vec();
+
+    assert_eq!(block.cta_data_blocks().unwrap(), vec![data_block.clone()]);
+    block
+        .replace_cta_detailed_timings(std::slice::from_ref(&timing))
+        .unwrap();
+
+    assert_eq!(&block.raw[4..6], original_data_block_bytes.as_slice());
+    assert_eq!(block.cta_data_blocks().unwrap(), vec![data_block]);
+    let decoded = block.cta_detailed_timings().unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].h_active, timing.h_active);
+    assert_eq!(decoded[0].v_active, timing.v_active);
+    assert_eq!(decoded[0].pixel_clock_khz, timing.pixel_clock_khz);
+    assert_eq!(
+        block
+            .as_bytes()
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+        0
+    );
 }
 
 #[test]

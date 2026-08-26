@@ -699,16 +699,17 @@ fn encode_display_id_timing(
     } else {
         timing.pixel_clock_khz
     };
-    if !(1..=0x00FF_FFFF).contains(&pixel_unit) {
+    const MAX_PIXEL_UNIT: u32 = 0x0100_0000;
+    if !(1..=MAX_PIXEL_UNIT).contains(&pixel_unit) {
         return Err(ExtensionWriteError::InvalidDisplayIdTimingField {
             tag,
             index,
             field: "pixel_clock_khz",
             value: timing.pixel_clock_khz,
             maximum: if type_one {
-                0x00FF_FFFF * 10
+                MAX_PIXEL_UNIT * 10
             } else {
-                0x00FF_FFFF
+                MAX_PIXEL_UNIT
             },
         });
     }
@@ -1213,10 +1214,7 @@ impl EdidBlock {
                 offset: header.dtd_offset as usize,
             });
         }
-
         // Validate the existing collection before creating a candidate block.
-        // replace_cta_detailed_timings intentionally treats offset zero differently,
-        // but header mutation must reject a malformed current layout.
         self.cta_data_blocks()
             .map_err(map_cta_extension_write_error)?;
         let populated_dtds = self
@@ -1271,12 +1269,9 @@ impl EdidBlock {
         if self.raw[0] != 0x02 {
             return Err(ExtensionWriteError::NotCta861);
         }
-        let blocks = if self.raw[2] == 0 {
-            Vec::new()
-        } else {
-            self.cta_data_blocks()
-                .map_err(map_cta_extension_write_error)?
-        };
+        let blocks = self
+            .cta_data_blocks()
+            .map_err(map_cta_extension_write_error)?;
         let old_flags = self.raw[3] & 0xF0;
         let mut rebuilt = Self::from_cta_data_blocks_and_timings(self.raw[1], &blocks, timings)?;
         rebuilt.raw[3] = old_flags | rebuilt.raw[3] & 0x0F;
@@ -1371,6 +1366,11 @@ fn parse_cta_data_blocks(
     let mut offset = 0;
     while offset < data.len() {
         let header = data[offset];
+        // A zero-filled remainder is padding, including an offset-zero
+        // collection; stop there without synthesizing empty data blocks.
+        if header == 0 && data[offset..].iter().all(|&byte| byte == 0) {
+            break;
+        }
         let tag = header >> 5;
         let length = (header & 0x1F) as usize;
         let payload_start = offset + 1;
