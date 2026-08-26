@@ -504,6 +504,16 @@ impl DisplayIdDataBlock {
     }
 }
 
+fn check_display_id_payload_length(length: usize) -> Result<(), ExtensionWriteError> {
+    if length > u8::MAX as usize {
+        return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+            length,
+            maximum: u8::MAX as usize,
+        });
+    }
+    Ok(())
+}
+
 impl std::error::Error for ExtensionWriteError {}
 
 impl DisplayIdDataBlock {
@@ -569,6 +579,7 @@ impl DisplayIdDataBlockView {
     ) -> Result<DisplayIdDataBlock, ExtensionWriteError> {
         match self {
             Self::ProductIdentification { raw } if matches!(tag, 0x00 | 0x20) => {
+                check_display_id_payload_length(raw.len())?;
                 Ok(DisplayIdDataBlock {
                     tag,
                     revision: 0,
@@ -576,6 +587,7 @@ impl DisplayIdDataBlockView {
                 })
             }
             Self::DisplayParameters { parameters } if matches!(tag, 0x01 | 0x21) => {
+                check_display_id_payload_length(parameters.raw.len())?;
                 if parameters.raw.len() < 29 {
                     return Err(ExtensionWriteError::DisplayIdPayloadTooShort {
                         tag,
@@ -645,12 +657,7 @@ impl DisplayIdDataBlockView {
                     })?;
                     payload.extend_from_slice(&typed.to_data_block()?.encode()?);
                 }
-                if payload.len() > u8::MAX as usize {
-                    return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
-                        length: payload.len(),
-                        maximum: u8::MAX as usize,
-                    });
-                }
+                check_display_id_payload_length(payload.len())?;
                 Ok(DisplayIdDataBlock {
                     tag,
                     revision: 0,
@@ -660,11 +667,14 @@ impl DisplayIdDataBlockView {
             Self::Unknown {
                 tag: original,
                 payload,
-            } if original == &tag => Ok(DisplayIdDataBlock {
-                tag,
-                revision: 0,
-                payload: payload.clone(),
-            }),
+            } if original == &tag => {
+                check_display_id_payload_length(payload.len())?;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload: payload.clone(),
+                })
+            }
             _ => Err(ExtensionWriteError::InvalidDisplayIdTag { tag }),
         }
     }

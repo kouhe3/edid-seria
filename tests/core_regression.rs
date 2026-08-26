@@ -744,6 +744,58 @@ fn displayid_typed_timing_encoder_rejects_empty_payload() {
 }
 
 #[test]
+fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
+    use edid_seria::{DisplayIdDataBlockView, DisplayIdDisplayParameters, ExtensionWriteError};
+
+    let product = DisplayIdDataBlockView::ProductIdentification { raw: vec![0; 256] };
+    assert!(matches!(
+        product.to_data_block_with_tag(0x00),
+        Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+            length: 256,
+            maximum: 255,
+        })
+    ));
+
+    let parameters = DisplayIdDisplayParameters {
+        horizontal_image_size_mm: 0,
+        vertical_image_size_mm: 0,
+        horizontal_pixel_count: 0,
+        vertical_pixel_count: 0,
+        features: 0,
+        primary_color_1: [0; 3],
+        primary_color_2: [0; 3],
+        primary_color_3: [0; 3],
+        white_point: [0; 3],
+        max_luminance_full: 0,
+        max_luminance_10_percent: 0,
+        min_luminance: 0,
+        color_depth_and_technology: 0,
+        gamma_eotf: 0,
+        raw: vec![0; 256],
+    };
+    let display_parameters = DisplayIdDataBlockView::DisplayParameters { parameters };
+    assert!(matches!(
+        display_parameters.to_data_block_with_tag(0x01),
+        Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+            length: 256,
+            maximum: 255,
+        })
+    ));
+
+    let unknown = DisplayIdDataBlockView::Unknown {
+        tag: 0x55,
+        payload: vec![0; 256],
+    };
+    assert!(matches!(
+        unknown.to_data_block_with_tag(0x55),
+        Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+            length: 256,
+            maximum: 255,
+        })
+    ));
+}
+
+#[test]
 fn displayid_typed_timing_encoder_rejects_sync_offsets_that_overlap_polarity() {
     use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, ExtensionWriteError};
 

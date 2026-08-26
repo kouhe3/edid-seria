@@ -85,8 +85,11 @@ instead of partially serialized bytes.
 
 The parse → `to_bytes()` path is lossless for the bytes held by an `Edid`.
 Raw CTA and DisplayID data-block APIs preserve unknown/reserved payload bytes
-and source order when those blocks are passed through unchanged. The CTA typed
-writer, `CtaDataBlockView::to_data_block`, encodes the fields represented by its
+and source order when those blocks are passed through unchanged. For CTA
+offset-zero collections, an all-zero suffix is interpreted as padding; an
+otherwise empty tag-0 block at that boundary is therefore ambiguous and is
+not treated as a distinct block. The CTA typed writer,
+`CtaDataBlockView::to_data_block`, encodes the fields represented by its
 view and retains representable vendor/raw tails; it may normalize fields that
 the typed view cannot represent, and it rejects unrepresentable edits. CTA
 header/capability and DTD mutation are checked and preserve unrelated layout
