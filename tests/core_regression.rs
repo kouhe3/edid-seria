@@ -398,6 +398,69 @@ fn extension_lifecycle_rejects_base_blocks_without_mutation() {
 }
 
 #[test]
+fn extension_move_reorders_existing_indices_atomically() {
+    use edid_seria::{CtaDataBlock, EdidError};
+
+    let first = EdidBlock::from_cta_data_blocks(
+        3,
+        &[CtaDataBlock {
+            tag: 2,
+            payload: vec![16],
+        }],
+    )
+    .unwrap();
+    let second = EdidBlock::from_cta_data_blocks(
+        3,
+        &[CtaDataBlock {
+            tag: 2,
+            payload: vec![31],
+        }],
+    )
+    .unwrap();
+    let third = EdidBlock::from_cta_data_blocks(
+        3,
+        &[CtaDataBlock {
+            tag: 2,
+            payload: vec![34],
+        }],
+    )
+    .unwrap();
+    let mut edid = Edid {
+        base: EdidBlock::new_default(),
+        extensions: vec![first.clone(), second.clone(), third.clone()],
+    };
+    edid.base.raw[126] = 3;
+    edid.base.update_checksum();
+    let base_before = edid.base.clone();
+
+    edid.move_extension(0, 2).unwrap();
+    assert_eq!(
+        edid.extensions,
+        vec![second.clone(), third.clone(), first.clone()]
+    );
+    assert_eq!(edid.base, base_before);
+
+    let before_invalid_source = edid.clone();
+    assert_eq!(
+        edid.move_extension(3, 0),
+        Err(EdidError::ExtensionIndexOutOfRange { index: 3, count: 3 })
+    );
+    assert_eq!(edid, before_invalid_source);
+
+    let before_invalid_target = edid.clone();
+    assert_eq!(
+        edid.move_extension(0, 3),
+        Err(EdidError::ExtensionIndexOutOfRange { index: 3, count: 3 })
+    );
+    assert_eq!(edid, before_invalid_target);
+
+    let serialized = edid.to_bytes_checked().unwrap();
+    let reparsed = Edid::from_bytes(&serialized).unwrap();
+    assert_eq!(reparsed, edid);
+    assert_eq!(reparsed.base.raw[126], 3);
+}
+
+#[test]
 fn dtd_and_metadata_property_roundtrips() {
     use edid_seria::{
         BaseMetadata, ChromaticityCoordinates, ChromaticityPoint, ColorManagementDescriptor,
@@ -563,4 +626,110 @@ fn dtd_and_metadata_property_roundtrips() {
     block.set_monitor_descriptor(3, &cvt_range).unwrap();
     assert_eq!(block.monitor_descriptor(3).unwrap(), Some(cvt_range));
     assert_eq!(block.validate(), Ok(()));
+}
+
+#[test]
+fn displayid_typed_encoder_roundtrips_view_and_bytes() {
+    use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, EdidBlock};
+
+    let timing = DisplayIdDetailedTiming {
+        pixel_clock_khz: 14_850,
+        h_active: 1_920,
+        h_blank: 280,
+        h_sync_offset: 88,
+        h_sync_width: 44,
+        v_active: 1_080,
+        v_blank: 45,
+        v_sync_offset: 4,
+        v_sync_width: 5,
+        h_sync_positive: true,
+        v_sync_positive: false,
+        preferred: true,
+    };
+    let view = DisplayIdDataBlockView::DetailedTiming {
+        timings: vec![timing],
+    };
+    let data_block = view.to_data_block_with_tag(0x03).unwrap();
+    assert_eq!(
+        data_block.encode().unwrap(),
+        vec![
+            0x03, 0x00, 20, 0xCC, 0x05, 0x00, 0x80, 0x7F, 0x07, 0x17, 0x01, 0x57, 0x80, 0x2B, 0x00,
+            0x37, 0x04, 0x2C, 0x00, 0x03, 0x00, 0x04, 0x00,
+        ]
+    );
+
+    let block = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &[data_block]).unwrap();
+    let parsed = block.display_id_data_blocks().unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].encode().unwrap(), block.raw[5..28].to_vec());
+    assert_eq!(
+        parsed[0].view().unwrap(),
+        DisplayIdDataBlockView::DetailedTiming {
+            timings: vec![timing],
+        }
+    );
+    assert_eq!(
+        block
+            .as_bytes()
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+        0
+    );
+}
+
+#[test]
+fn cta_header_and_dtd_mutations_update_checksum_and_are_atomic_on_failure() {
+    use edid_seria::{CtaDataBlock, EdidBlock};
+    let mut block = EdidBlock::from_cta_data_blocks(
+        3,
+        &[CtaDataBlock {
+            tag: 2,
+            payload: vec![0x90],
+        }],
+    )
+    .unwrap();
+    let original_offset = block.cta_header().unwrap().dtd_offset;
+    block.set_cta_capabilities(true, true, false, true).unwrap();
+    let header = block.cta_header().unwrap();
+    assert_eq!(header.revision, 3);
+    assert_eq!(header.dtd_offset, original_offset);
+    assert!(header.underscan);
+    assert!(header.basic_audio);
+    assert!(!header.ycbcr_444);
+    assert!(header.ycbcr_422);
+    assert_eq!(
+        block
+            .as_bytes()
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+        0
+    );
+
+    let timing = all_presets()[0].clone();
+    block
+        .replace_cta_detailed_timings(std::slice::from_ref(&timing))
+        .unwrap();
+    let decoded_timings = block.cta_detailed_timings().unwrap();
+    assert_eq!(decoded_timings.len(), 1);
+    assert_eq!(decoded_timings[0].h_active, timing.h_active);
+    assert_eq!(decoded_timings[0].v_active, timing.v_active);
+    assert_eq!(decoded_timings[0].pixel_clock_khz, timing.pixel_clock_khz);
+    assert_eq!(
+        block
+            .as_bytes()
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+        0
+    );
+
+    let before_invalid_header = block.clone();
+    let mut invalid_header = header;
+    invalid_header.dtd_offset = invalid_header.dtd_offset.saturating_add(1);
+    assert!(block.set_cta_header(invalid_header).is_err());
+    assert_eq!(block, before_invalid_header);
+
+    let before_too_many_dtds = block.clone();
+    let too_many = vec![all_presets()[0].clone(); 7];
+    assert!(block.replace_cta_detailed_timings(&too_many).is_err());
+    assert_eq!(block, before_too_many_dtds);
 }

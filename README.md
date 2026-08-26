@@ -15,9 +15,9 @@ CRU-style display override tools.
  - **Preset tables** — PC (VESA), common wide-screen, and HDTV (CEA-861)
    timings; the HDTV table covers common modes, not every CEA VIC.
  - **Safe serialization** — rewrites Base Block DTD slots while preserving
-   monitor descriptors and extension blocks; also provides checked
-   construction and mutation for raw CTA-861 and DisplayID data blocks,
-   including automatic offsets, payload limits, and checksums.
+   monitor descriptors and extension blocks. Checked extension constructors
+   provide raw CTA-861 and DisplayID data-block collection layout, payload
+   limits, offsets, and checksums.
  - **Strict parsing** — validated complete EDID sequences with base-header,
    checksum, version, extension-count, and structured error reporting.
  - **Metadata and descriptors** — typed base-block identity, chromaticity
@@ -25,15 +25,18 @@ CRU-style display override tools.
    EDID 1.4 standard monitor descriptors (name, serial, alphanumeric string, color point, additional standard timings, Established Timings III, CVT 3-byte timing codes, Display Color Management, and extended Range Limits with Secondary GTF & CVT support), with unknown descriptor payload preservation.
  - **Manual and interlaced DTD access** — strict manual timing serialization
    plus raw DTD flag round-trips; the legacy timing view remains progressive-only.
-- **Extension writers** — raw CTA-861 extensions can be constructed with
-  data-block collections and progressive DTDs; CTA data-block collections and
-  DisplayID raw data blocks can be constructed or replaced. Typed extension
-  views remain available for inspection, and unknown payloads are preserved
-  when passed through raw APIs.
-- **High-level display inspection** — convenient `Edid` helpers (`monitor_name()`, `serial_number()`, `preferred_timing()`, `all_detailed_timings()`) that aggregate Base and CTA extension descriptors.
-- **Modeline and Hex interoperability** — X11/xrandr Modeline string formatting and
-  parsing, and flexible EDID hex string (compact, formatted, C-array) import/export.
-- **`#![deny(unsafe_code)]`**, no panics on arbitrary EDID input, MSRV 1.95.
+ - **Extension writers** — `CtaDataBlockView::to_data_block` encodes the
+   modeled CTA typed views (including representable vendor tails), while raw
+   CTA blocks remain available for unknown or reserved data. CTA capability
+   flags/header and DTD collections can be edited with checked mutation APIs.
+   `DisplayIdDataBlockView::to_data_block` and
+   `to_data_block_with_tag` encode Product Identification, Display Parameters,
+   Type I/Type VII detailed timings, embedded CTA, and unknown raw blocks;
+   `DisplayIdDataBlock::encode` remains the raw block writer.
+ - **High-level display inspection** — convenient `Edid` helpers (`monitor_name()`, `serial_number()`, `preferred_timing()`, `all_detailed_timings()`) that aggregate Base and CTA extension descriptors.
+ - **Modeline and Hex interoperability** — X11/xrandr Modeline string formatting and
+   parsing, and flexible EDID hex string (compact, formatted, C-array) import/export.
+ - **`#![deny(unsafe_code)]`**, no panics on arbitrary EDID input, MSRV 1.95.
 
 ## Quick start
 
@@ -71,21 +74,36 @@ fn main() -> std::io::Result<()> {
 ## Core-library boundaries
 
 The library is platform-independent. It does not enumerate displays, access the
-Windows registry, request elevation, or apply driver overrides. The current
-extension writers are intentionally raw: CTA-861 extensions can be constructed
-with data-block collections and progressive DTDs, and their data-block
-collections can be replaced; DisplayID extensions can be constructed or have
-their raw data blocks replaced. Derived offsets, payload limits, and checksums
-are enforced, but vendor-specific fields are not canonicalized.
+Windows registry, request elevation, or apply driver overrides.
 
-Typed CTA-861 and DisplayID views are available for inspection, while typed
-field editing remains limited; the extension writers do not provide general
-typed extension editing.
+`Edid::to_bytes()` is the unchecked compatibility serializer: it concatenates
+the public base and extension block bytes exactly as stored, without repairing
+the extension count, checksums, offsets, or payload lengths. Use
+`Edid::to_bytes_checked()` (or `validate_for_serialization()` first) when output
+must be validated. Checked output is atomic: invalid state returns an error
+instead of partially serialized bytes.
 
-`serialize_resolutions` retains its compatibility behavior: malformed or
-partial input may fall back or be skipped. New code should use
-`serialize_resolutions_checked` or `serialize_timings`, which reject malformed
-input, invalid timings, and unavailable DTD slots with structured errors.
+The parse → `to_bytes()` path is lossless for the bytes held by an `Edid`.
+Raw CTA and DisplayID data-block APIs preserve unknown/reserved payload bytes
+and source order when those blocks are passed through unchanged. The CTA typed
+writer, `CtaDataBlockView::to_data_block`, encodes the fields represented by its
+view and retains representable vendor/raw tails; it may normalize fields that
+the typed view cannot represent, and it rejects unrepresentable edits. CTA
+header/capability and DTD mutation are checked and preserve unrelated layout
+or data-block content as documented by their APIs.
+
+DisplayID typed views have encoders for Product Identification, Display
+Parameters, Type I/Type VII detailed timing, embedded CTA, and unknown blocks.
+`DisplayIdDataBlockView::to_data_block_with_tag` selects the 1.x/2.x tag when
+that distinction matters; the shorthand `to_data_block` chooses a canonical
+tag. `DisplayIdDataBlock::encode` and raw collection constructors remain
+available when the caller owns the exact raw block fields.
+
+No implicit canonicalization is promised. Canonical ordering, flag policy, and
+other multi-strategy normalization remain deferred; typed writers may choose a
+canonical tag or normalize fields not represented by their view. Use raw APIs
+when exact payload preservation is required.
+
 
 The strict DTD API is byte-precise for representable fields. New writes
 normalize flags to digital separate sync unless the explicit flagged writer is
@@ -98,11 +116,14 @@ used; analog/composite semantics are not inferred by the progressive-only view.
 | `cargo test` | Run the test suite (bit-level golden bytes, round-trips, CVT cases) |
 | `cargo clippy --all-targets -- -D warnings` | Lint gate used by CI |
 | `cargo doc --no-deps` | Build documentation (`missing_docs` is a warning) |
-| `cargo package` | Verify the publishable package |
+| `cargo package --list` | Inspect the files that will enter the source package |
+| `cargo package` | Verify the publishable package and its packaged source |
 
-The optional fuzz target is under `fuzz/` and can be run with
-`cargo-fuzz` after installing that tool.
-
+The optional fuzz target is under `fuzz/`. After installing `cargo-fuzz`, run
+`cargo fuzz build parse-edid` to compile it and
+`cargo fuzz run parse-edid -- -runs=64` for a bounded smoke run. The target
+checks that successful `to_bytes_checked()` output reparses and is stable,
+and exercises raw and currently available typed extension paths.
 ## Architecture
 
 | Module | Responsibility |
@@ -115,16 +136,18 @@ Key design decisions are recorded in [docs/decisions](docs/decisions/).
 
 ## Contributing
 
-PRs welcome. CI runs formatting, Clippy, tests, rustdoc, and package checks in
-an Ubuntu quality job. It also runs library and integration tests on Ubuntu,
-Windows, and macOS, plus MSRV 1.95 tests on Ubuntu. To reproduce the quality
-job locally:
+PRs welcome. CI runs formatting, Clippy, tests, rustdoc, package-list/source
+checks, and a bounded libFuzzer build/smoke job. It also runs library and
+integration tests on Ubuntu, Windows, and macOS, plus MSRV 1.95 tests on
+Ubuntu. The fuzz job is intentionally Ubuntu-only and does not add fuzzing
+assumptions to the platform matrix. To reproduce the quality job locally:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo package --list
 cargo package
 ```
 
