@@ -504,11 +504,13 @@ impl DisplayIdDataBlock {
     }
 }
 
+const MAX_DISPLAY_ID_PAYLOAD: usize = 121;
+
 fn check_display_id_payload_length(length: usize) -> Result<(), ExtensionWriteError> {
-    if length > u8::MAX as usize {
+    if length > MAX_DISPLAY_ID_PAYLOAD {
         return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
             length,
-            maximum: u8::MAX as usize,
+            maximum: MAX_DISPLAY_ID_PAYLOAD,
         });
     }
     Ok(())

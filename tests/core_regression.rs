@@ -752,7 +752,7 @@ fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
         product.to_data_block_with_tag(0x00),
         Err(ExtensionWriteError::DisplayIdPayloadTooLong {
             length: 256,
-            maximum: 255,
+            maximum: 121,
         })
     ));
 
@@ -778,7 +778,7 @@ fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
         display_parameters.to_data_block_with_tag(0x01),
         Err(ExtensionWriteError::DisplayIdPayloadTooLong {
             length: 256,
-            maximum: 255,
+            maximum: 121,
         })
     ));
 
@@ -790,7 +790,33 @@ fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
         unknown.to_data_block_with_tag(0x55),
         Err(ExtensionWriteError::DisplayIdPayloadTooLong {
             length: 256,
-            maximum: 255,
+            maximum: 121,
+        })
+    ));
+}
+
+#[test]
+fn displayid_typed_raw_payloads_reject_lengths_above_extension_limit() {
+    use edid_seria::{DisplayIdDataBlockView, ExtensionWriteError};
+
+    let product = DisplayIdDataBlockView::ProductIdentification { raw: vec![0; 122] };
+    assert!(matches!(
+        product.to_data_block_with_tag(0x00),
+        Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+            length: 122,
+            maximum: 121,
+        })
+    ));
+
+    let unknown = DisplayIdDataBlockView::Unknown {
+        tag: 0x55,
+        payload: vec![0; 122],
+    };
+    assert!(matches!(
+        unknown.to_data_block_with_tag(0x55),
+        Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+            length: 122,
+            maximum: 121,
         })
     ));
 }
