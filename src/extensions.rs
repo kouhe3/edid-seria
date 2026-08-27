@@ -168,7 +168,8 @@ pub enum DisplayIdDataBlockView {
     Cta {
         /// Parsed CTA data blocks in source order.
         data_blocks: Vec<CtaDataBlock>,
-        /// Original embedded CTA payload.
+        /// Original embedded CTA payload. Re-encoding the typed view uses the parsed
+        /// blocks and may canonicalize padding or other unmodeled tail bytes.
         raw: Vec<u8>,
     },
     /// Any DisplayID tag not modeled by this version.
@@ -295,12 +296,61 @@ pub enum ExtensionWriteError {
         /// Underlying error.
         source: crate::error::DtdError,
     },
-    /// The DisplayID payload cannot fit in one extension.
+    /// CTA's DTD offset is outside the block or does not match its layout.
+    InvalidDtdOffset {
+        /// Raw CTA DTD offset byte.
+        offset: usize,
+    },
+    /// The complete DisplayID payload exceeds the available section space.
     DisplayIdPayloadTooLong {
-        /// Encoded payload length.
+        /// Supplied payload length.
         length: usize,
-        /// Maximum length.
+        /// Maximum representable payload length.
         maximum: usize,
+    },
+    /// The DisplayID payload is shorter than a typed representation requires.
+    DisplayIdPayloadTooShort {
+        /// DisplayID data-block tag.
+        tag: u8,
+        /// Supplied payload length.
+        length: usize,
+        /// Minimum representable payload length.
+        minimum: usize,
+    },
+    /// A DisplayID timing field cannot be represented after the encoded minus-one transform.
+    InvalidDisplayIdTimingField {
+        /// DisplayID data-block tag.
+        tag: u8,
+        /// Zero-based timing index.
+        index: usize,
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u32,
+        /// Largest representable decoded value.
+        maximum: u32,
+    },
+    /// A Type I DisplayID pixel clock is not an integral number of 10-kHz units.
+    InvalidDisplayIdPixelClock {
+        /// Zero-based timing index.
+        index: usize,
+        /// Supplied pixel clock in kHz.
+        value: u32,
+    },
+    /// A DisplayID data-block tag cannot be emitted by the canonical typed encoder.
+    InvalidDisplayIdTag {
+        /// Supplied tag.
+        tag: u8,
+    },
+    /// An embedded CTA block could not be decoded and re-encoded through its typed view.
+    InvalidDisplayIdEmbeddedCta {
+        /// Underlying CTA parsing error.
+        source: ExtensionError,
+    },
+    /// The CTA extension has a malformed data-block collection or DTD layout.
+    InvalidCtaLayout {
+        /// Underlying structured CTA parsing error.
+        source: ExtensionError,
     },
     /// The target block is not a CTA-861 extension.
     NotCta861,
@@ -391,10 +441,47 @@ impl std::fmt::Display for ExtensionWriteError {
             Self::CtaDtdInvalid { index, source } => {
                 write!(f, "CTA DTD {index} is invalid: {source}")
             }
+            Self::InvalidDtdOffset { offset } => {
+                write!(f, "CTA DTD offset {offset} is outside the extension")
+            }
             Self::DisplayIdPayloadTooLong { length, maximum } => write!(
                 f,
                 "DisplayID payload length {length} exceeds the {maximum}-byte maximum"
             ),
+            Self::DisplayIdPayloadTooShort {
+                tag,
+                length,
+                minimum,
+            } => write!(
+                f,
+                "DisplayID tag 0x{tag:02X} payload length {length} is below minimum {minimum}"
+            ),
+            Self::InvalidDisplayIdTimingField {
+                tag,
+                index,
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID tag 0x{tag:02X} timing {index} field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidDisplayIdPixelClock { index, value } => write!(
+                f,
+                "DisplayID Type I timing {index} pixel clock {value} kHz is not a multiple of 10"
+            ),
+            Self::InvalidDisplayIdTag { tag } => {
+                write!(
+                    f,
+                    "DisplayID tag 0x{tag:02X} is not supported by this typed encoder"
+                )
+            }
+            Self::InvalidCtaLayout { source } => {
+                write!(f, "CTA extension layout is invalid: {source}")
+            }
+            Self::InvalidDisplayIdEmbeddedCta { source } => {
+                write!(f, "embedded CTA data block is invalid: {source}")
+            }
             Self::NotCta861 => f.write_str("block is not a CTA-861 extension"),
             Self::NotDisplayId => f.write_str("block is not a DisplayID extension"),
         }
@@ -417,6 +504,18 @@ impl DisplayIdDataBlock {
     }
 }
 
+const MAX_DISPLAY_ID_PAYLOAD: usize = 121;
+
+fn check_display_id_payload_length(length: usize) -> Result<(), ExtensionWriteError> {
+    if length > MAX_DISPLAY_ID_PAYLOAD {
+        return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+            length,
+            maximum: MAX_DISPLAY_ID_PAYLOAD,
+        });
+    }
+    Ok(())
+}
+
 impl std::error::Error for ExtensionWriteError {}
 
 impl DisplayIdDataBlock {
@@ -437,7 +536,7 @@ impl DisplayIdDataBlock {
             }),
             0x81 => {
                 let raw = self.payload.clone();
-                let data_blocks = parse_cta_data_blocks(&self.payload, 0)?;
+                let data_blocks = parse_cta_data_blocks(&self.payload, 0, false)?;
                 Ok(DisplayIdDataBlockView::Cta { data_blocks, raw })
             }
             tag => Ok(DisplayIdDataBlockView::Unknown {
@@ -446,6 +545,209 @@ impl DisplayIdDataBlock {
             }),
         }
     }
+}
+
+impl DisplayIdDataBlockView {
+    /// Encode this typed view using its canonical DisplayID data-block tag.
+    ///
+    /// Use [`Self::to_data_block_with_tag`] when preserving the 1.x/2.x tag
+    /// distinction matters for Product, Parameters, or Timing views.
+    pub fn to_data_block(&self) -> Result<DisplayIdDataBlock, ExtensionWriteError> {
+        let tag = match self {
+            Self::ProductIdentification { .. } => 0x00,
+            Self::DisplayParameters { .. } => 0x01,
+            Self::DetailedTiming { timings } => {
+                if timings.is_empty() {
+                    0x22
+                } else if timings
+                    .iter()
+                    .all(|timing| timing.pixel_clock_khz % 10 == 0)
+                {
+                    0x03
+                } else {
+                    0x22
+                }
+            }
+            Self::Cta { .. } => 0x81,
+            Self::Unknown { tag, .. } => *tag,
+        };
+        self.to_data_block_with_tag(tag)
+    }
+
+    /// Encode this typed view while explicitly selecting its DisplayID tag.
+    pub fn to_data_block_with_tag(
+        &self,
+        tag: u8,
+    ) -> Result<DisplayIdDataBlock, ExtensionWriteError> {
+        match self {
+            Self::ProductIdentification { raw } if matches!(tag, 0x00 | 0x20) => {
+                check_display_id_payload_length(raw.len())?;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload: raw.clone(),
+                })
+            }
+            Self::DisplayParameters { parameters } if matches!(tag, 0x01 | 0x21) => {
+                check_display_id_payload_length(parameters.raw.len())?;
+                if parameters.raw.len() < 29 {
+                    return Err(ExtensionWriteError::DisplayIdPayloadTooShort {
+                        tag,
+                        length: parameters.raw.len(),
+                        minimum: 29,
+                    });
+                }
+                let mut payload = parameters.raw.clone();
+                payload[0..2].copy_from_slice(&parameters.horizontal_image_size_mm.to_le_bytes());
+                payload[2..4].copy_from_slice(&parameters.vertical_image_size_mm.to_le_bytes());
+                payload[4..6].copy_from_slice(&parameters.horizontal_pixel_count.to_le_bytes());
+                payload[6..8].copy_from_slice(&parameters.vertical_pixel_count.to_le_bytes());
+                payload[8] = parameters.features;
+                payload[9..12].copy_from_slice(&parameters.primary_color_1);
+                payload[12..15].copy_from_slice(&parameters.primary_color_2);
+                payload[15..18].copy_from_slice(&parameters.primary_color_3);
+                payload[18..21].copy_from_slice(&parameters.white_point);
+                payload[21..23].copy_from_slice(&parameters.max_luminance_full.to_le_bytes());
+                payload[23..25].copy_from_slice(&parameters.max_luminance_10_percent.to_le_bytes());
+                payload[25..27].copy_from_slice(&parameters.min_luminance.to_le_bytes());
+                payload[27] = parameters.color_depth_and_technology;
+                payload[28] = parameters.gamma_eotf;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::DetailedTiming { timings } if matches!(tag, 0x03 | 0x22) => {
+                if timings.is_empty() {
+                    return Err(ExtensionWriteError::DisplayIdPayloadTooShort {
+                        tag,
+                        length: 0,
+                        minimum: 20,
+                    });
+                }
+                let type_one = tag == 0x03;
+                let length = timings.len().checked_mul(20).ok_or(
+                    ExtensionWriteError::DisplayIdPayloadTooLong {
+                        length: usize::MAX,
+                        maximum: u8::MAX as usize,
+                    },
+                )?;
+                if length > u8::MAX as usize {
+                    return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                        length,
+                        maximum: u8::MAX as usize,
+                    });
+                }
+                let mut payload = Vec::with_capacity(length);
+                for (index, timing) in timings.iter().enumerate() {
+                    payload.extend_from_slice(&encode_display_id_timing(
+                        timing, index, type_one, tag,
+                    )?);
+                }
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::Cta { data_blocks, .. } if tag == 0x81 => {
+                let mut payload = Vec::new();
+                for data_block in data_blocks {
+                    let typed = data_block.view().map_err(|source| {
+                        ExtensionWriteError::InvalidDisplayIdEmbeddedCta { source }
+                    })?;
+                    payload.extend_from_slice(&typed.to_data_block()?.encode()?);
+                }
+                check_display_id_payload_length(payload.len())?;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::Unknown {
+                tag: original,
+                payload,
+            } if original == &tag => {
+                check_display_id_payload_length(payload.len())?;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload: payload.clone(),
+                })
+            }
+            _ => Err(ExtensionWriteError::InvalidDisplayIdTag { tag }),
+        }
+    }
+}
+
+fn encode_display_id_timing(
+    timing: &DisplayIdDetailedTiming,
+    index: usize,
+    type_one: bool,
+    tag: u8,
+) -> Result<[u8; 20], ExtensionWriteError> {
+    let encode_field = |field: &'static str, value: u32, maximum: u32| {
+        if !(1..=maximum).contains(&value) {
+            return Err(ExtensionWriteError::InvalidDisplayIdTimingField {
+                tag,
+                index,
+                field,
+                value,
+                maximum,
+            });
+        }
+        Ok((value - 1) as u16)
+    };
+    let pixel_unit = if type_one {
+        if timing.pixel_clock_khz == 0 || !timing.pixel_clock_khz.is_multiple_of(10) {
+            return Err(ExtensionWriteError::InvalidDisplayIdPixelClock {
+                index,
+                value: timing.pixel_clock_khz,
+            });
+        }
+        timing.pixel_clock_khz / 10
+    } else {
+        timing.pixel_clock_khz
+    };
+    const MAX_PIXEL_UNIT: u32 = 0x0100_0000;
+    if !(1..=MAX_PIXEL_UNIT).contains(&pixel_unit) {
+        return Err(ExtensionWriteError::InvalidDisplayIdTimingField {
+            tag,
+            index,
+            field: "pixel_clock_khz",
+            value: timing.pixel_clock_khz,
+            maximum: if type_one {
+                MAX_PIXEL_UNIT * 10
+            } else {
+                MAX_PIXEL_UNIT
+            },
+        });
+    }
+    let h_active = encode_field("h_active", timing.h_active, 65_536)?;
+    let h_blank = encode_field("h_blank", timing.h_blank, 65_536)?;
+    let h_offset = encode_field("h_sync_offset", timing.h_sync_offset, 32_768)?;
+    let h_width = encode_field("h_sync_width", timing.h_sync_width, 65_536)?;
+    let v_active = encode_field("v_active", timing.v_active, 65_536)?;
+    let v_blank = encode_field("v_blank", timing.v_blank, 65_536)?;
+    let v_offset = encode_field("v_sync_offset", timing.v_sync_offset, 32_768)?;
+    let v_width = encode_field("v_sync_width", timing.v_sync_width, 65_536)?;
+    let mut bytes = [0u8; 20];
+    let clock = (pixel_unit - 1).to_le_bytes();
+    bytes[0..3].copy_from_slice(&clock[..3]);
+    bytes[3] = u8::from(timing.preferred) << 7;
+    bytes[4..6].copy_from_slice(&h_active.to_le_bytes());
+    bytes[6..8].copy_from_slice(&h_blank.to_le_bytes());
+    bytes[8..10]
+        .copy_from_slice(&(h_offset | (u16::from(timing.h_sync_positive) << 15)).to_le_bytes());
+    bytes[10..12].copy_from_slice(&h_width.to_le_bytes());
+    bytes[12..14].copy_from_slice(&v_active.to_le_bytes());
+    bytes[14..16].copy_from_slice(&v_blank.to_le_bytes());
+    bytes[16..18]
+        .copy_from_slice(&(v_offset | (u16::from(timing.v_sync_positive) << 15)).to_le_bytes());
+    bytes[18..20].copy_from_slice(&v_width.to_le_bytes());
+    Ok(bytes)
 }
 
 fn decode_detailed_timings(
@@ -517,6 +819,7 @@ fn decode_display_parameters(
 
 /// Errors returned while reading an extension's structured view.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExtensionError {
     /// The block is not a CTA-861 extension.
     NotCta861,
@@ -692,6 +995,16 @@ impl std::fmt::Display for ExtensionError {
 
 impl std::error::Error for ExtensionError {}
 
+fn map_cta_extension_write_error(error: ExtensionError) -> ExtensionWriteError {
+    match error {
+        ExtensionError::NotCta861 => ExtensionWriteError::NotCta861,
+        ExtensionError::InvalidDtdOffset { offset } => {
+            ExtensionWriteError::InvalidDtdOffset { offset }
+        }
+        source => ExtensionWriteError::InvalidCtaLayout { source },
+    }
+}
+
 impl EdidBlock {
     /// Identify this block as CTA-861, DisplayID or unknown.
     #[must_use]
@@ -766,7 +1079,10 @@ impl EdidBlock {
         if self.raw[0] != 0x02 {
             return Err(ExtensionWriteError::NotCta861);
         }
-        let rebuilt = Self::from_cta_data_blocks(self.raw[1], blocks)?;
+        let old_flags = self.raw[3] & 0xF0;
+        let mut rebuilt = Self::from_cta_data_blocks(self.raw[1], blocks)?;
+        rebuilt.raw[3] = old_flags;
+        rebuilt.update_checksum();
         *self = rebuilt;
         Ok(())
     }
@@ -876,7 +1192,7 @@ impl EdidBlock {
         if !(4..=127).contains(&end) {
             return Err(ExtensionError::InvalidDtdOffset { offset: end });
         }
-        parse_cta_data_blocks(&self.raw[4..end], 4)
+        parse_cta_data_blocks(&self.raw[4..end], 4, dtd_offset == 0)
     }
 
     /// Read and validate the CTA-861 extension header and capability flags.
@@ -900,6 +1216,81 @@ impl EdidBlock {
             ycbcr_444: flags & 0x20 != 0,
             ycbcr_422: flags & 0x10 != 0,
         })
+    }
+
+    /// Replace CTA capability flags and native DTD count without changing layout.
+    pub fn set_cta_header(&mut self, header: CtaHeader) -> Result<(), ExtensionWriteError> {
+        let current = self.cta_header().map_err(map_cta_extension_write_error)?;
+        let current_offset = current.dtd_offset;
+        if header.dtd_offset != current_offset {
+            return Err(ExtensionWriteError::InvalidDtdOffset {
+                offset: header.dtd_offset as usize,
+            });
+        }
+        // Validate the existing collection before creating a candidate block.
+        self.cta_data_blocks()
+            .map_err(map_cta_extension_write_error)?;
+        let populated_dtds = self
+            .cta_detailed_timings_flagged()
+            .map_err(map_cta_extension_write_error)?
+            .len();
+        let maximum_native = populated_dtds.min(0x0F);
+        if usize::from(header.native_dtd_count) > maximum_native {
+            return Err(ExtensionWriteError::CtaDtdsTooLong {
+                count: usize::from(header.native_dtd_count),
+                maximum: maximum_native,
+            });
+        }
+
+        let mut candidate = self.clone();
+        candidate.raw[1] = header.revision;
+        candidate.raw[3] = u8::from(header.underscan) << 7
+            | u8::from(header.basic_audio) << 6
+            | u8::from(header.ycbcr_444) << 5
+            | u8::from(header.ycbcr_422) << 4
+            | header.native_dtd_count;
+        candidate.update_checksum();
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Set CTA capability flags while retaining the current revision, layout, and native count.
+    pub fn set_cta_capabilities(
+        &mut self,
+        underscan: bool,
+        basic_audio: bool,
+        ycbcr_444: bool,
+        ycbcr_422: bool,
+    ) -> Result<(), ExtensionWriteError> {
+        let header = self.cta_header().map_err(map_cta_extension_write_error)?;
+        self.set_cta_header(CtaHeader {
+            revision: header.revision,
+            dtd_offset: header.dtd_offset,
+            native_dtd_count: header.native_dtd_count,
+            underscan,
+            basic_audio,
+            ycbcr_444,
+            ycbcr_422,
+        })
+    }
+
+    /// Replace the CTA DTD collection, rebuilding its offset, native count, layout, and checksum.
+    pub fn replace_cta_detailed_timings(
+        &mut self,
+        timings: &[crate::timing::DetailedTiming],
+    ) -> Result<(), ExtensionWriteError> {
+        if self.raw[0] != 0x02 {
+            return Err(ExtensionWriteError::NotCta861);
+        }
+        let blocks = self
+            .cta_data_blocks()
+            .map_err(map_cta_extension_write_error)?;
+        let old_flags = self.raw[3] & 0xF0;
+        let mut rebuilt = Self::from_cta_data_blocks_and_timings(self.raw[1], &blocks, timings)?;
+        rebuilt.raw[3] = old_flags | rebuilt.raw[3] & 0x0F;
+        rebuilt.update_checksum();
+        *self = rebuilt;
+        Ok(())
     }
 
     /// Read progressive Detailed Timing Descriptors from this CTA-861 extension block.
@@ -983,11 +1374,17 @@ fn parse_display_id_data_blocks(
 fn parse_cta_data_blocks(
     data: &[u8],
     base_offset: usize,
+    stop_at_zero_padding: bool,
 ) -> Result<Vec<CtaDataBlock>, ExtensionError> {
     let mut blocks = Vec::new();
     let mut offset = 0;
     while offset < data.len() {
         let header = data[offset];
+        // Only an offset-zero collection has an unknown boundary where a
+        // zero-filled remainder can be treated as padding.
+        if stop_at_zero_padding && header == 0 && data[offset..].iter().all(|&byte| byte == 0) {
+            break;
+        }
         let tag = header >> 5;
         let length = (header & 0x1F) as usize;
         let payload_start = offset + 1;

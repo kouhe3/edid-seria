@@ -609,6 +609,26 @@ impl Edid {
         Ok(())
     }
 
+    /// Move an existing extension from `from` to `to`.
+    ///
+    /// Both indices are zero-based positions in the current extension list;
+    /// unlike [`Self::insert_extension`], `to` must already name an existing
+    /// extension. Invalid indices are rejected before changing any state.
+    /// Moving an extension does not alter the base block, extension count, or
+    /// any extension bytes.
+    pub fn move_extension(&mut self, from: usize, to: usize) -> Result<(), EdidError> {
+        let count = self.extensions.len();
+        if from >= count {
+            return Err(EdidError::ExtensionIndexOutOfRange { index: from, count });
+        }
+        if to >= count {
+            return Err(EdidError::ExtensionIndexOutOfRange { index: to, count });
+        }
+        let extension = self.extensions.remove(from);
+        self.extensions.insert(to, extension);
+        Ok(())
+    }
+
     /// Remove an extension and update the base extension count.
     pub fn remove_extension(&mut self, index: usize) -> Option<EdidBlock> {
         let extension = (index < self.extensions.len()).then(|| self.extensions.remove(index));

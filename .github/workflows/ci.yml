@@ -38,9 +38,30 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps
 
-      - name: Package
+      - name: Package source list
+        run: cargo package --list
+
+      - name: Package source verification
         run: cargo package
 
+  fuzz:
+    name: fuzz build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Build parser fuzz target
+        working-directory: fuzz
+        run: cargo fuzz build parse-edid
+
+      - name: Run bounded parser smoke
+        working-directory: fuzz
+        run: cargo fuzz run parse-edid -- -runs=64
 
   platform:
     name: library checks (${{ matrix.os }})
