@@ -50,6 +50,43 @@ fn exercise_cta_typed_writer(block: &EdidBlock) {
     }
 }
 
+fn exercise_display_id_typed_writer(block: &EdidBlock) {
+    let Ok(header) = block.display_id_header() else {
+        return;
+    };
+    let Ok(raw_blocks) = block.display_id_data_blocks() else {
+        return;
+    };
+    let mut typed_blocks = Vec::with_capacity(raw_blocks.len());
+    for raw in raw_blocks {
+        let Ok(view) = raw.view() else {
+            continue;
+        };
+        let Ok(encoded) = view.to_data_block() else {
+            continue;
+        };
+        let reparsed = encoded
+            .view()
+            .expect("a successfully encoded DisplayID typed block must decode");
+        let reencoded = reparsed
+            .to_data_block()
+            .expect("a decoded DisplayID typed block must encode");
+        assert_eq!(reencoded, encoded);
+        typed_blocks.push(encoded);
+    }
+
+    if let Ok(rebuilt) = EdidBlock::from_display_id_data_blocks(
+        header.revision,
+        header.product_type_or_primary_use,
+        header.extension_count,
+        &typed_blocks,
+    ) {
+        let checked = EdidBlock::from_bytes_checked(rebuilt.as_bytes())
+            .expect("DisplayID writer output must pass block checksum validation");
+        assert_eq!(checked.as_bytes(), rebuilt.as_bytes());
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // 1. Fuzz strict EDID parser and high-level methods.
     if let Ok(edid) = Edid::from_bytes(data) {
@@ -98,6 +135,7 @@ fuzz_target!(|data: &[u8]| {
             }
         }
         let _ = block.display_id_header();
+        exercise_display_id_typed_writer(&block);
         if let Ok(did_blocks) = block.display_id_data_blocks() {
             for did in did_blocks {
                 // Exercise DisplayID typed views and raw encoders.
