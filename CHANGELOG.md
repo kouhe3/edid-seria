@@ -32,9 +32,8 @@ All notable changes to `edid-seria` are documented here.
   DisplayID editing is no longer inspection-only.
 - The crate's MSRV is Rust 1.95 (edition 2024). Public enums are part of the
   API surface: adding variants can make downstream exhaustive `match`
-  expressions fail to compile. Consumers should include a wildcard arm where
-  future compatibility matters. `ExtensionWriteError` is `#[non_exhaustive]`;
-  callers must already use a wildcard arm when matching it.
+  expressions fail to compile. `ExtensionError` and `ExtensionWriteError` are
+  `#[non_exhaustive]`; callers must use a wildcard arm when matching them.
 
 ## [0.1.0] - 2026-08-26
 

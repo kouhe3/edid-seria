@@ -819,6 +819,7 @@ fn decode_display_parameters(
 
 /// Errors returned while reading an extension's structured view.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExtensionError {
     /// The block is not a CTA-861 extension.
     NotCta861,
