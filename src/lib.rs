@@ -17,7 +17,9 @@ pub mod metadata;
 pub mod serialize;
 pub use builder::{BaseBlockBuilder, BaseBlockError, TimingPlacement};
 pub mod timing;
-pub use edid::{DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock};
+pub use edid::{
+    DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock, MAX_EDID_BLOCKS, MAX_EDID_BYTES,
+};
 pub use error::{
     DescriptorError, DtdError, DtdField, EdidError, HexError, MetadataError, MetadataWriteError,
     ModelineError, SerializeError,
