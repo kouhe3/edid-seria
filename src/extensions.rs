@@ -1035,7 +1035,8 @@ impl EdidBlock {
                     maximum: 0x1F,
                 });
             }
-            total_collection_length = total_collection_length.saturating_add(1 + block.payload.len());
+            total_collection_length =
+                total_collection_length.saturating_add(1 + block.payload.len());
         }
 
         if total_collection_length > MAX_COLLECTION_LENGTH {
