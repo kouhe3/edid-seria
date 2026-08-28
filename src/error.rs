@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Errors returned when an EDID block cannot be accepted by the strict parser.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EdidError {
     /// The input is not exactly one complete EDID block.
     InvalidLength {
@@ -54,6 +55,7 @@ pub enum EdidError {
 
 /// Errors returned while decoding or encoding base-block metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataError {
     /// The block does not contain the EDID base-block header.
     NotBaseBlock,
@@ -113,6 +115,7 @@ impl std::error::Error for MetadataError {}
 /// This is separate from [`MetadataError`] so existing exhaustive matches on
 /// that public 0.1 enum remain source-compatible.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataWriteError {
     /// The block does not contain the EDID base-block header.
     NotBaseBlock,
@@ -169,6 +172,7 @@ impl std::error::Error for MetadataWriteError {}
 
 /// Errors returned while decoding or encoding monitor descriptors.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DescriptorError {
     /// The requested descriptor slot does not exist.
     SlotOutOfRange {
@@ -293,6 +297,7 @@ pub enum DtdField {
 
 /// Errors returned when a timing cannot be represented by an EDID DTD.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DtdError {
     /// The requested DTD slot does not exist.
     SlotOutOfRange {
@@ -355,6 +360,7 @@ impl std::error::Error for DtdError {}
 
 /// Errors returned by the strict resolution-to-EDID serializer.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SerializeError {
     /// Existing input is not an integral sequence of EDID blocks.
     InvalidExistingLength {
@@ -486,6 +492,7 @@ impl std::error::Error for EdidError {}
 
 /// Errors returned while parsing an X11 / xrandr Modeline string.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ModelineError {
     /// Modeline string is empty or contains insufficient tokens.
     InsufficientTokens,
@@ -519,6 +526,7 @@ impl std::error::Error for ModelineError {}
 
 /// Errors returned while parsing hexadecimal EDID strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HexError {
     /// String contains a non-hexadecimal character.
     InvalidHexCharacter {

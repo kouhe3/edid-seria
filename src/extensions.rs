@@ -1022,25 +1022,41 @@ impl EdidBlock {
     ) -> Result<Self, ExtensionWriteError> {
         const DATA_BLOCK_OFFSET: usize = 4;
         const DTD_SIZE: usize = 18;
-
-        let mut collection = Vec::new();
-        for data_block in blocks {
-            collection.extend_from_slice(&data_block.encode()?);
-        }
         const MAX_COLLECTION_LENGTH: usize = 123;
-        if collection.len() > MAX_COLLECTION_LENGTH {
+
+        let mut total_collection_length = 0usize;
+        for block in blocks {
+            if block.tag > 0x07 {
+                return Err(ExtensionWriteError::InvalidCtaTag { tag: block.tag });
+            }
+            if block.payload.len() > 0x1F {
+                return Err(ExtensionWriteError::CtaPayloadTooLong {
+                    length: block.payload.len(),
+                    maximum: 0x1F,
+                });
+            }
+            total_collection_length = total_collection_length.saturating_add(1 + block.payload.len());
+        }
+
+        if total_collection_length > MAX_COLLECTION_LENGTH {
             return Err(ExtensionWriteError::CtaDataBlocksTooLong {
-                length: collection.len(),
+                length: total_collection_length,
                 maximum: MAX_COLLECTION_LENGTH,
             });
         }
-        let dtd_offset = DATA_BLOCK_OFFSET + collection.len();
+
+        let dtd_offset = DATA_BLOCK_OFFSET + total_collection_length;
         let maximum = (127usize.saturating_sub(dtd_offset)) / DTD_SIZE;
         if timings.len() > maximum {
             return Err(ExtensionWriteError::CtaDtdsTooLong {
                 count: timings.len(),
                 maximum,
             });
+        }
+
+        let mut collection = Vec::with_capacity(total_collection_length);
+        for data_block in blocks {
+            collection.extend_from_slice(&data_block.encode()?);
         }
 
         let mut block = Self {
@@ -1090,17 +1106,22 @@ impl EdidBlock {
         blocks: &[DisplayIdDataBlock],
     ) -> Result<Self, ExtensionWriteError> {
         const DATA_OFFSET: usize = 5;
-        const MAX_PAYLOAD: usize = 121;
 
-        let mut payload = Vec::new();
+        let mut total_len = 0usize;
+        for block in blocks {
+            if block.payload.len() > u8::MAX as usize {
+                return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                    length: block.payload.len(),
+                    maximum: u8::MAX as usize,
+                });
+            }
+            total_len = total_len.saturating_add(3 + block.payload.len());
+        }
+        check_display_id_payload_length(total_len)?;
+
+        let mut payload = Vec::with_capacity(total_len);
         for data_block in blocks {
             payload.extend_from_slice(&data_block.encode()?);
-        }
-        if payload.len() > MAX_PAYLOAD {
-            return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
-                length: payload.len(),
-                maximum: MAX_PAYLOAD,
-            });
         }
 
         let mut block = Self {
@@ -1149,11 +1170,10 @@ impl EdidBlock {
         }
         let payload_length = self.raw[2] as usize;
         const DISPLAY_ID_DATA_OFFSET: usize = 5;
-        const DISPLAY_ID_MAX_PAYLOAD: usize = 121;
-        if payload_length > DISPLAY_ID_MAX_PAYLOAD {
+        if payload_length > MAX_DISPLAY_ID_PAYLOAD {
             return Err(ExtensionError::InvalidDisplayIdLength {
                 length: payload_length,
-                maximum: DISPLAY_ID_MAX_PAYLOAD,
+                maximum: MAX_DISPLAY_ID_PAYLOAD,
             });
         }
         let checksum_offset = DISPLAY_ID_DATA_OFFSET + payload_length;

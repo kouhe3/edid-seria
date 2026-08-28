@@ -18,6 +18,7 @@ pub enum TimingPlacement {
 
 /// Errors produced while constructing a base block.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BaseBlockError {
     /// Identity metadata is not representable.
     Metadata(MetadataError),
