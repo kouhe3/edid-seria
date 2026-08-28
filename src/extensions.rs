@@ -630,15 +630,10 @@ impl DisplayIdDataBlockView {
                 let length = timings.len().checked_mul(20).ok_or(
                     ExtensionWriteError::DisplayIdPayloadTooLong {
                         length: usize::MAX,
-                        maximum: u8::MAX as usize,
+                        maximum: MAX_DISPLAY_ID_PAYLOAD,
                     },
                 )?;
-                if length > u8::MAX as usize {
-                    return Err(ExtensionWriteError::DisplayIdPayloadTooLong {
-                        length,
-                        maximum: u8::MAX as usize,
-                    });
-                }
+                check_display_id_payload_length(length)?;
                 let mut payload = Vec::with_capacity(length);
                 for (index, timing) in timings.iter().enumerate() {
                     payload.extend_from_slice(&encode_display_id_timing(
@@ -2665,6 +2660,35 @@ mod tests {
             Err(ExtensionWriteError::CtaPayloadTooLong {
                 length: 32,
                 maximum: 31
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_displayid_detailed_timing_payload_over_121_bytes() {
+        let timing = DisplayIdDetailedTiming {
+            pixel_clock_khz: 60_000,
+            h_active: 1920,
+            h_blank: 280,
+            h_sync_offset: 88,
+            h_sync_width: 44,
+            v_active: 1080,
+            v_blank: 45,
+            v_sync_offset: 5,
+            v_sync_width: 6,
+            h_sync_positive: true,
+            v_sync_positive: true,
+            preferred: false,
+        };
+        let view = DisplayIdDataBlockView::DetailedTiming {
+            timings: vec![timing; 7],
+        };
+
+        assert!(matches!(
+            view.to_data_block_with_tag(0x03),
+            Err(ExtensionWriteError::DisplayIdPayloadTooLong {
+                length: 140,
+                maximum: 121
             })
         ));
     }
