@@ -126,10 +126,12 @@ fn parse_existing_blocks(existing: Option<&[u8]>) -> Result<Vec<EdidBlock>, Seri
     let Some(data) = existing else {
         return Ok(vec![EdidBlock::new_default()]);
     };
-    if data.len() < EDID_BLOCK_SIZE || !data.len().is_multiple_of(EDID_BLOCK_SIZE) {
+    if data.len() < EDID_BLOCK_SIZE
+        || data.len() > crate::edid::MAX_EDID_BYTES
+        || !data.len().is_multiple_of(EDID_BLOCK_SIZE)
+    {
         return Err(SerializeError::InvalidExistingLength { actual: data.len() });
     }
-
     let mut blocks = Vec::with_capacity(data.len() / EDID_BLOCK_SIZE);
     for (index, chunk) in data.chunks(EDID_BLOCK_SIZE).enumerate() {
         let block = EdidBlock::from_bytes_checked(chunk)
@@ -500,6 +502,15 @@ mod tests {
         assert!(matches!(
             serialize_timings(None, std::slice::from_ref(&timing)),
             Err(SerializeError::InvalidTiming { index: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn serialize_rejects_oversized_existing_edid_blocks() {
+        let oversized = vec![0u8; crate::edid::MAX_EDID_BYTES + EDID_BLOCK_SIZE];
+        assert!(matches!(
+            serialize_resolutions_checked(Some(&oversized), &[]),
+            Err(SerializeError::InvalidExistingLength { actual }) if actual == crate::edid::MAX_EDID_BYTES + EDID_BLOCK_SIZE
         ));
     }
 }

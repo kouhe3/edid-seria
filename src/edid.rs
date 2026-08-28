@@ -33,6 +33,10 @@ const EDID_DESCRIPTOR_LEN: usize = 18;
 const EDID_HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
 /// Size of one EDID block in bytes.
 pub const EDID_BLOCK_SIZE: usize = 128;
+/// Maximum number of blocks in a conformant EDID structure (1 base block + 255 extension blocks).
+pub const MAX_EDID_BLOCKS: usize = 256;
+/// Maximum byte size of a conformant EDID structure (32 KiB).
+pub const MAX_EDID_BYTES: usize = MAX_EDID_BLOCKS * EDID_BLOCK_SIZE;
 const DETAILED_SLOTS: usize = 4;
 pub(crate) const DETAILED_START: usize = 54;
 /// Classification of a detailed-timing descriptor slot.
@@ -507,10 +511,12 @@ pub struct Edid {
 impl Edid {
     /// Parse and validate a complete EDID byte sequence.
     pub fn from_bytes(data: &[u8]) -> Result<Self, EdidError> {
-        if data.len() < EDID_BLOCK_SIZE || !data.len().is_multiple_of(EDID_BLOCK_SIZE) {
+        if data.len() < EDID_BLOCK_SIZE
+            || data.len() > MAX_EDID_BYTES
+            || !data.len().is_multiple_of(EDID_BLOCK_SIZE)
+        {
             return Err(EdidError::InvalidBlockSequenceLength { actual: data.len() });
         }
-
         let base = EdidBlock::from_bytes_checked(&data[..EDID_BLOCK_SIZE])?;
         base.validate_base()?;
 
@@ -723,7 +729,8 @@ impl Edid {
 pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, crate::error::HexError> {
     use crate::error::HexError;
 
-    let mut bytes = Vec::new();
+    let max_hex_chars = MAX_EDID_BYTES * 2;
+    let mut bytes = Vec::with_capacity(s.len().min(max_hex_chars) / 2);
     let mut chars = s.char_indices().peekable();
     let mut current_nibble: Option<u8> = None;
 
@@ -773,6 +780,11 @@ pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, crate::error::HexError
                 current_nibble = Some(digit);
             }
             Some(high) => {
+                if bytes.len() >= MAX_EDID_BYTES {
+                    return Err(HexError::InvalidLength {
+                        bytes: bytes.len() + 1,
+                    });
+                }
                 bytes.push((high << 4) | digit);
                 current_nibble = None;
             }
@@ -1441,5 +1453,22 @@ mod tests {
             Err(EdidError::InvalidChecksum { .. })
         ));
         assert_eq!(edid, before);
+    }
+
+    #[test]
+    fn rejects_oversized_edid_input_and_hex_dos() {
+        // Exceeding 256 blocks (32 KiB)
+        let oversized_bytes = vec![0u8; MAX_EDID_BYTES + EDID_BLOCK_SIZE];
+        assert!(matches!(
+            Edid::from_bytes(&oversized_bytes),
+            Err(EdidError::InvalidBlockSequenceLength { actual }) if actual == MAX_EDID_BYTES + EDID_BLOCK_SIZE
+        ));
+
+        // Oversized hex string
+        let oversized_hex = "00".repeat(MAX_EDID_BYTES + 1);
+        assert!(matches!(
+            Edid::from_hex(&oversized_hex),
+            Err(crate::error::HexError::InvalidLength { .. })
+        ));
     }
 }

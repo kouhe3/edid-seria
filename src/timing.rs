@@ -79,15 +79,22 @@ impl DetailedTiming {
     /// Total horizontal pixels (active + blanking + 2×border).
     #[must_use]
     pub fn h_total(&self) -> u32 {
-        self.h_active + self.h_front + self.h_sync + self.h_back + 2 * self.h_border
+        self.h_active
+            .saturating_add(self.h_front)
+            .saturating_add(self.h_sync)
+            .saturating_add(self.h_back)
+            .saturating_add(self.h_border.saturating_mul(2))
     }
 
     /// Total vertical lines (active + blanking + 2×border).
     #[must_use]
     pub fn v_total(&self) -> u32 {
-        self.v_active + self.v_front + self.v_sync + self.v_back + 2 * self.v_border
+        self.v_active
+            .saturating_add(self.v_front)
+            .saturating_add(self.v_sync)
+            .saturating_add(self.v_back)
+            .saturating_add(self.v_border.saturating_mul(2))
     }
-
     /// Format this timing as an X11 / xrandr Modeline string.
     ///
     /// If `name` is `None`, a default label like `"1920x1080_60.00"` is generated.
@@ -102,11 +109,11 @@ impl DetailedTiming {
         } else {
             format!("{dot_clock:.3}")
         };
-        let h_sync_start = self.h_active + self.h_front;
-        let h_sync_end = h_sync_start + self.h_sync;
+        let h_sync_start = self.h_active.saturating_add(self.h_front);
+        let h_sync_end = h_sync_start.saturating_add(self.h_sync);
         let h_total = self.h_total();
-        let v_sync_start = self.v_active + self.v_front;
-        let v_sync_end = v_sync_start + self.v_sync;
+        let v_sync_start = self.v_active.saturating_add(self.v_front);
+        let v_sync_end = v_sync_start.saturating_add(self.v_sync);
         let v_total = self.v_total();
         let h_pol_str = if self.h_pol { "+hsync" } else { "-hsync" };
         let v_pol_str = if self.v_pol { "+vsync" } else { "-vsync" };
@@ -1534,5 +1541,31 @@ mod tests {
             DetailedTiming::from_modeline(insufficient),
             Err(ModelineError::InsufficientTokens)
         ));
+    }
+
+    #[test]
+    fn detailed_timing_helper_computations_do_not_overflow() {
+        let extreme = DetailedTiming {
+            pixel_clock_khz: u32::MAX,
+            h_active: u32::MAX,
+            h_front: u32::MAX,
+            h_sync: u32::MAX,
+            h_back: u32::MAX,
+            h_border: u32::MAX,
+            v_active: u32::MAX,
+            v_front: u32::MAX,
+            v_sync: u32::MAX,
+            v_back: u32::MAX,
+            v_border: u32::MAX,
+            h_pol: true,
+            v_pol: false,
+            v_rate: 60.0,
+        };
+
+        assert_eq!(extreme.h_total(), u32::MAX);
+        assert_eq!(extreme.v_total(), u32::MAX);
+
+        let modeline = extreme.to_modeline(None);
+        assert!(modeline.starts_with("Modeline \"4294967295x4294967295_60.00\""));
     }
 }
