@@ -1,6 +1,6 @@
 [package]
 name = "edid-seria"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 description = "EDID parsing and serialization: detailed timings, CVT/CVT-RB/CVT-RB2 computation, EDID block I/O"

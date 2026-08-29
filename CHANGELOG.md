@@ -2,7 +2,7 @@
 
 All notable changes to `edid-seria` are documented here.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-29
 
 ### Changed
 
@@ -60,5 +60,6 @@ All notable changes to `edid-seria` are documented here.
   does not promise canonical ordering or byte-for-byte output after a typed
   view is edited.
 
-[Unreleased]: https://github.com/kouhe3/edid-seria/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kouhe3/edid-seria/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kouhe3/edid-seria/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kouhe3/edid-seria/releases/tag/v0.1.0
