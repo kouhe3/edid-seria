@@ -5,9 +5,9 @@ use crate::edid::EdidBlock;
 mod cta;
 
 pub use cta::{
-    CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
-    CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
-    CtaY420Support,
+    CtaAdaptiveSync, CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
+    CtaExtendedDataBlockView, CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock,
+    CtaVideoCapability, CtaVideoMode, CtaY420Support,
 };
 
 /// Recognized kind of an EDID extension block.
@@ -276,6 +276,13 @@ pub enum ExtensionWriteError {
         /// Typed field name.
         field: &'static str,
     },
+    /// Minimum refresh rate exceeds maximum refresh rate or is zero.
+    InvalidRefreshRateRange {
+        /// Minimum refresh rate in Hz.
+        min_refresh_hz: u8,
+        /// Maximum refresh rate in Hz.
+        max_refresh_hz: u8,
+    },
     /// The complete CTA data-block collection does not fit before byte 127.
     CtaDataBlocksTooLong {
         /// Supplied collection length.
@@ -430,6 +437,13 @@ impl std::fmt::Display for ExtensionWriteError {
             } => write!(
                 f,
                 "CTA field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidRefreshRateRange {
+                min_refresh_hz,
+                max_refresh_hz,
+            } => write!(
+                f,
+                "invalid refresh rate range: {min_refresh_hz} Hz .. {max_refresh_hz} Hz"
             ),
             Self::CtaDataBlocksTooLong { length, maximum } => write!(
                 f,
@@ -917,6 +931,13 @@ pub enum ExtensionError {
     },
     /// A CTA YCbCr 4:2:0 Capability Map is present but no Video Data Block exists.
     Y420CapabilityMapMissingVideoDataBlock,
+    /// CTA Adaptive-Sync block has an invalid refresh rate range.
+    InvalidRefreshRateRange {
+        /// Minimum refresh rate in Hz.
+        min_refresh_hz: u8,
+        /// Maximum refresh rate in Hz.
+        max_refresh_hz: u8,
+    },
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -1004,6 +1025,13 @@ impl std::fmt::Display for ExtensionError {
             Self::Y420CapabilityMapMissingVideoDataBlock => {
                 f.write_str("CTA Y420 capability map is present without any Video Data Block")
             }
+            Self::InvalidRefreshRateRange {
+                min_refresh_hz,
+                max_refresh_hz,
+            } => write!(
+                f,
+                "invalid refresh rate range: {min_refresh_hz} Hz .. {max_refresh_hz} Hz"
+            ),
         }
     }
 }
@@ -1422,9 +1450,7 @@ fn parse_cta_data_blocks(
     let mut offset = 0;
     while offset < data.len() {
         let header = data[offset];
-        // Only an offset-zero collection has an unknown boundary where a
-        // zero-filled remainder can be treated as padding.
-        if stop_at_zero_padding && header == 0 && data[offset..].iter().all(|&byte| byte == 0) {
+        if header == 0 && stop_at_zero_padding {
             break;
         }
         let tag = header >> 5;
@@ -1449,7 +1475,7 @@ fn parse_cta_data_blocks(
 #[cfg(test)]
 mod tests {
     use super::{
-        CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
+        CtaAdaptiveSync, CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
         CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
         CtaVideoMode, CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView,
         DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError,
@@ -1566,16 +1592,114 @@ mod tests {
 
         let adaptive_sync = CtaDataBlock {
             tag: 7,
-            payload: vec![0x1A, 0x01, 0x02],
+            payload: vec![0x1A, 0x01, 48, 144],
         };
         assert_eq!(
             adaptive_sync.view().unwrap(),
-            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync {
-                raw: vec![0x1A, 0x01, 0x02],
-            })
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                flags: 0x01,
+                min_refresh_hz: 48,
+                max_refresh_hz: 144,
+                raw: vec![0x1A, 0x01, 48, 144],
+            }))
         );
     }
 
+    #[test]
+    fn cta_adaptive_sync_roundtrip_modification_and_boundary_rejection() {
+        // Parse valid block with extra tail bytes
+        let block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x05, 48, 144, 0xDE, 0xAD],
+        };
+        let view = block.view().unwrap();
+        let CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(mut sync)) = view
+        else {
+            panic!("expected AdaptiveSync view");
+        };
+        assert_eq!(sync.flags, 0x05);
+        assert_eq!(sync.min_refresh_hz, 48);
+        assert_eq!(sync.max_refresh_hz, 144);
+        assert_eq!(sync.raw, vec![0x1A, 0x05, 48, 144, 0xDE, 0xAD]);
+
+        // Unmodified round-trip preserves raw tail
+        let encoded =
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(sync.clone()))
+                .to_data_block()
+                .unwrap();
+        assert_eq!(encoded, block);
+
+        // Modifying fields updates payload while preserving tail
+        sync.min_refresh_hz = 60;
+        sync.max_refresh_hz = 240;
+        sync.flags = 0x07;
+        let modified_block =
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(sync.clone()))
+                .to_data_block()
+                .unwrap();
+        assert_eq!(
+            modified_block.payload,
+            vec![0x1A, 0x07, 60, 240, 0xDE, 0xAD]
+        );
+
+        // Constructor creates valid block
+        let created = CtaAdaptiveSync::new(1, 255, 0x01).unwrap();
+        assert_eq!(created.min_refresh_hz, 1);
+        assert_eq!(created.max_refresh_hz, 255);
+        assert_eq!(created.raw, vec![0x1A, 0x01, 1, 255]);
+
+        // Constructor rejects reverse range and zero
+        assert!(matches!(
+            CtaAdaptiveSync::new(144, 48, 0),
+            Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz: 144,
+                max_refresh_hz: 48
+            })
+        ));
+        assert!(matches!(
+            CtaAdaptiveSync::new(0, 144, 0),
+            Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz: 0,
+                max_refresh_hz: 144
+            })
+        ));
+
+        // Parser rejects reverse range, zero, and truncated payloads
+        let reverse_block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x01, 144, 48],
+        };
+        assert!(matches!(
+            reverse_block.view(),
+            Err(ExtensionError::InvalidRefreshRateRange {
+                min_refresh_hz: 144,
+                max_refresh_hz: 48
+            })
+        ));
+        let zero_block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x01, 0, 144],
+        };
+        assert!(matches!(
+            zero_block.view(),
+            Err(ExtensionError::InvalidRefreshRateRange {
+                min_refresh_hz: 0,
+                max_refresh_hz: 144
+            })
+        ));
+        let truncated_block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x01, 48],
+        };
+        assert!(matches!(
+            truncated_block.view(),
+            Err(ExtensionError::TruncatedExtendedDataBlock {
+                extended_tag: 0x1A,
+                length: 3,
+                minimum: 4
+            })
+        ));
+    }
     #[test]
     fn cta_y420_video_and_capability_map_roundtrip_and_query() {
         let vdb = CtaDataBlock {
@@ -2719,8 +2843,13 @@ mod tests {
             })
         ));
         assert!(matches!(
-            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw: vec![] })
-                .to_data_block(),
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                flags: 0,
+                min_refresh_hz: 48,
+                max_refresh_hz: 144,
+                raw: vec![],
+            }))
+            .to_data_block(),
             Err(ExtensionWriteError::InvalidCtaExtendedPayload {
                 expected_tag: 0x1A,
                 actual_tag: None,
@@ -2728,9 +2857,12 @@ mod tests {
             })
         ));
         assert!(matches!(
-            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync {
-                raw: vec![0x05, 0x01]
-            })
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                flags: 0,
+                min_refresh_hz: 48,
+                max_refresh_hz: 144,
+                raw: vec![0x05, 0x01],
+            }))
             .to_data_block(),
             Err(ExtensionWriteError::InvalidCtaExtendedPayload {
                 expected_tag: 0x1A,

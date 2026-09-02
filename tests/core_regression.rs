@@ -61,7 +61,7 @@ fn extension_kind_exposes_extension_metadata() {
 #[test]
 fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
     use edid_seria::{
-        CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
+        CtaAdaptiveSync, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
         CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
     };
 
@@ -176,6 +176,20 @@ fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
         CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420CapabilityMap {
             raw: vec![0x0F, 0x01],
         })
+    );
+
+    let adaptive_sync = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x1A, 0x01, 48, 144],
+    };
+    assert_eq!(
+        adaptive_sync.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+            flags: 0x01,
+            min_refresh_hz: 48,
+            max_refresh_hz: 144,
+            raw: vec![0x1A, 0x01, 48, 144],
+        }))
     );
 
     let unknown = CtaDataBlock {

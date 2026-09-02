@@ -280,11 +280,8 @@ pub enum CtaExtendedDataBlockView {
         /// Original extended-tag-prefixed payload.
         raw: Vec<u8>,
     },
-    /// CTA Adaptive-Sync Data Block, extended tag 0x1A; raw fields retained.
-    AdaptiveSync {
-        /// Original extended-tag-prefixed payload.
-        raw: Vec<u8>,
-    },
+    /// CTA Adaptive-Sync Data Block, extended tag 0x1A.
+    AdaptiveSync(CtaAdaptiveSync),
     /// An unsupported CTA extended data block.
     Unknown {
         /// Extended tag code.
@@ -292,6 +289,42 @@ pub enum CtaExtendedDataBlockView {
         /// Payload bytes after the extended tag.
         payload: Vec<u8>,
     },
+}
+
+/// A CTA-861 Adaptive-Sync Data Block (Extended Tag 0x1A).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtaAdaptiveSync {
+    /// Capability and descriptor flags (byte 1).
+    pub flags: u8,
+    /// Minimum supported refresh rate in Hz (byte 2).
+    pub min_refresh_hz: u8,
+    /// Maximum supported refresh rate in Hz (byte 3).
+    pub max_refresh_hz: u8,
+    /// Original extended-tag-prefixed payload (`[0x1A, ...]`).
+    pub raw: Vec<u8>,
+}
+
+impl CtaAdaptiveSync {
+    /// Create a new Adaptive-Sync descriptor with the specified refresh rates and flags.
+    pub fn new(
+        min_refresh_hz: u8,
+        max_refresh_hz: u8,
+        flags: u8,
+    ) -> Result<Self, ExtensionWriteError> {
+        if min_refresh_hz == 0 || max_refresh_hz == 0 || min_refresh_hz > max_refresh_hz {
+            return Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz,
+                max_refresh_hz,
+            });
+        }
+        let raw = vec![0x1A, flags, min_refresh_hz, max_refresh_hz];
+        Ok(Self {
+            flags,
+            min_refresh_hz,
+            max_refresh_hz,
+            raw,
+        })
+    }
 }
 
 /// Resolved CTA-861 YCbCr 4:2:0 video capabilities for a CTA data collection.
@@ -568,18 +601,28 @@ impl CtaDataBlockView {
                     payload: encoded,
                 })
             }
-            Self::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw }) => {
-                if raw.first().copied() != Some(0x1A) {
+            Self::Extended(CtaExtendedDataBlockView::AdaptiveSync(adaptive_sync)) => {
+                if adaptive_sync.raw.len() < 4 || adaptive_sync.raw.first().copied() != Some(0x1A) {
                     return Err(ExtensionWriteError::InvalidCtaExtendedPayload {
                         expected_tag: 0x1A,
-                        actual_tag: raw.first().copied(),
-                        length: raw.len(),
+                        actual_tag: adaptive_sync.raw.first().copied(),
+                        length: adaptive_sync.raw.len(),
                     });
                 }
-                Ok(CtaDataBlock {
-                    tag: 7,
-                    payload: raw.clone(),
-                })
+                if adaptive_sync.min_refresh_hz == 0
+                    || adaptive_sync.max_refresh_hz == 0
+                    || adaptive_sync.min_refresh_hz > adaptive_sync.max_refresh_hz
+                {
+                    return Err(ExtensionWriteError::InvalidRefreshRateRange {
+                        min_refresh_hz: adaptive_sync.min_refresh_hz,
+                        max_refresh_hz: adaptive_sync.max_refresh_hz,
+                    });
+                }
+                let mut payload = adaptive_sync.raw.clone();
+                payload[1] = adaptive_sync.flags;
+                payload[2] = adaptive_sync.min_refresh_hz;
+                payload[3] = adaptive_sync.max_refresh_hz;
+                Ok(CtaDataBlock { tag: 7, payload })
             }
             Self::Extended(CtaExtendedDataBlockView::Y420Video { modes }) => {
                 if modes.is_empty() {
@@ -990,11 +1033,32 @@ impl CtaDataBlock {
                     raw: self.payload.clone(),
                 },
             )),
-            0x1A => Ok(CtaDataBlockView::Extended(
-                CtaExtendedDataBlockView::AdaptiveSync {
-                    raw: self.payload.clone(),
-                },
-            )),
+            0x1A => {
+                if self.payload.len() < 4 {
+                    return Err(ExtensionError::TruncatedExtendedDataBlock {
+                        extended_tag,
+                        length: self.payload.len(),
+                        minimum: 4,
+                    });
+                }
+                let flags = self.payload[1];
+                let min_refresh_hz = self.payload[2];
+                let max_refresh_hz = self.payload[3];
+                if min_refresh_hz == 0 || max_refresh_hz == 0 || min_refresh_hz > max_refresh_hz {
+                    return Err(ExtensionError::InvalidRefreshRateRange {
+                        min_refresh_hz,
+                        max_refresh_hz,
+                    });
+                }
+                Ok(CtaDataBlockView::Extended(
+                    CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                        flags,
+                        min_refresh_hz,
+                        max_refresh_hz,
+                        raw: self.payload.clone(),
+                    }),
+                ))
+            }
             extended_tag => Ok(CtaDataBlockView::Extended(
                 CtaExtendedDataBlockView::Unknown {
                     extended_tag,
