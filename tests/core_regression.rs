@@ -675,8 +675,10 @@ fn dtd_and_metadata_property_roundtrips() {
 
 #[test]
 fn displayid_typed_encoder_roundtrips_view_and_bytes() {
-    use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, EdidBlock};
-
+    use edid_seria::{
+        DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDynamicVideoTimingRange,
+        EdidBlock,
+    };
     let timing = DisplayIdDetailedTiming {
         pixel_clock_khz: 14_850,
         h_active: 1_920,
@@ -718,6 +720,41 @@ fn displayid_typed_encoder_roundtrips_view_and_bytes() {
             .as_bytes()
             .iter()
             .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+        0
+    );
+
+    // Test DisplayIdDynamicVideoTimingRange round-trip through encoder and EdidBlock
+    let dynamic_range = DisplayIdDynamicVideoTimingRange {
+        min_pixel_clock_khz: 100_000,
+        max_pixel_clock_khz: 600_000,
+        min_vfreq_hz: 48,
+        max_vfreq_hz: 165,
+        seamless_dynamic_video_timing: true,
+        raw: vec![],
+    };
+    let range_view = DisplayIdDataBlockView::DynamicVideoTimingRange {
+        range: dynamic_range.clone(),
+    };
+    let range_data_block = range_view.to_data_block().unwrap();
+    assert_eq!(range_data_block.tag, 0x25);
+
+    let range_edid_block =
+        EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&range_data_block))
+            .unwrap();
+    let ranges = range_edid_block
+        .display_id_dynamic_video_timing_ranges()
+        .unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].min_pixel_clock_khz, 100_000);
+    assert_eq!(ranges[0].max_pixel_clock_khz, 600_000);
+    assert_eq!(ranges[0].min_vfreq_hz, 48);
+    assert_eq!(ranges[0].max_vfreq_hz, 165);
+    assert!(ranges[0].seamless_dynamic_video_timing);
+    assert_eq!(
+        range_edid_block
+            .display_id_detailed_timings()
+            .unwrap()
+            .len(),
         0
     );
 }

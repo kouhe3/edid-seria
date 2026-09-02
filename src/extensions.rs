@@ -147,6 +147,23 @@ pub struct DisplayIdDisplayParameters {
     pub raw: Vec<u8>,
 }
 
+/// DisplayID Dynamic Video Timing Range Limits Data Block (Tag 0x25 in 2.0, Tag 0x09 in 1.x).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdDynamicVideoTimingRange {
+    /// Minimum pixel clock in kHz (1 kHz .. 16,777,216 kHz).
+    pub min_pixel_clock_khz: u32,
+    /// Maximum pixel clock in kHz (1 kHz .. 16,777,216 kHz).
+    pub max_pixel_clock_khz: u32,
+    /// Minimum vertical refresh rate in Hz.
+    pub min_vfreq_hz: u8,
+    /// Maximum vertical refresh rate in Hz.
+    pub max_vfreq_hz: u16,
+    /// Seamless dynamic video timing change / VRR support flag.
+    pub seamless_dynamic_video_timing: bool,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
 /// Typed read-only views for DisplayID data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisplayIdDataBlockView {
@@ -164,6 +181,11 @@ pub enum DisplayIdDataBlockView {
     DetailedTiming {
         /// Timing entries in source order.
         timings: Vec<DisplayIdDetailedTiming>,
+    },
+    /// DisplayID Dynamic Video Timing Range Limits (Tag 0x25 or Tag 0x09).
+    DynamicVideoTimingRange {
+        /// Decoded dynamic video timing range limits.
+        range: DisplayIdDynamicVideoTimingRange,
     },
     /// Embedded CTA data-block collection.
     Cta {
@@ -355,6 +377,13 @@ pub enum ExtensionWriteError {
         /// Underlying CTA parsing error.
         source: ExtensionError,
     },
+    /// DisplayID Dynamic Video Timing Range has an invalid range (min > max or out of range).
+    InvalidDisplayIdDynamicRange {
+        /// DisplayID data-block tag.
+        tag: u8,
+        /// Detail description of the invalid range constraint.
+        reason: &'static str,
+    },
     /// The CTA extension has a malformed data-block collection or DTD layout.
     InvalidCtaLayout {
         /// Underlying structured CTA parsing error.
@@ -491,6 +520,10 @@ impl std::fmt::Display for ExtensionWriteError {
                     "DisplayID tag 0x{tag:02X} is not supported by this typed encoder"
                 )
             }
+            Self::InvalidDisplayIdDynamicRange { tag, reason } => write!(
+                f,
+                "DisplayID dynamic range data block 0x{tag:02X} has invalid range: {reason}"
+            ),
             Self::InvalidCtaLayout { source } => {
                 write!(f, "CTA extension layout is invalid: {source}")
             }
@@ -549,6 +582,9 @@ impl DisplayIdDataBlock {
             0x22 => Ok(DisplayIdDataBlockView::DetailedTiming {
                 timings: decode_detailed_timings(self, false)?,
             }),
+            0x09 | 0x25 => Ok(DisplayIdDataBlockView::DynamicVideoTimingRange {
+                range: decode_dynamic_video_timing_range(self)?,
+            }),
             0x81 => {
                 let raw = self.payload.clone();
                 let data_blocks = parse_cta_data_blocks(&self.payload, 0, false)?;
@@ -583,6 +619,7 @@ impl DisplayIdDataBlockView {
                     0x22
                 }
             }
+            Self::DynamicVideoTimingRange { .. } => 0x25,
             Self::Cta { .. } => 0x81,
             Self::Unknown { tag, .. } => *tag,
         };
@@ -685,6 +722,49 @@ impl DisplayIdDataBlockView {
                     tag,
                     revision: 0,
                     payload: payload.clone(),
+                })
+            }
+            Self::DynamicVideoTimingRange { range } if matches!(tag, 0x09 | 0x25) => {
+                const MAX_PIXEL_KHZ: u32 = 0x0100_0000;
+                if !(1..=MAX_PIXEL_KHZ).contains(&range.min_pixel_clock_khz)
+                    || !(1..=MAX_PIXEL_KHZ).contains(&range.max_pixel_clock_khz)
+                    || range.min_pixel_clock_khz > range.max_pixel_clock_khz
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "pixel clock out of range or min exceeds max",
+                    });
+                }
+                if range.min_vfreq_hz == 0
+                    || range.max_vfreq_hz == 0
+                    || range.max_vfreq_hz > 1023
+                    || u16::from(range.min_vfreq_hz) > range.max_vfreq_hz
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "refresh rate out of range or min exceeds max",
+                    });
+                }
+                let mut payload = if range.raw.len() >= 9 {
+                    range.raw.clone()
+                } else {
+                    vec![0u8; 9]
+                };
+                check_display_id_payload_length(payload.len())?;
+                let min_clock = (range.min_pixel_clock_khz - 1).to_le_bytes();
+                payload[0..3].copy_from_slice(&min_clock[..3]);
+                let max_clock = (range.max_pixel_clock_khz - 1).to_le_bytes();
+                payload[3..6].copy_from_slice(&max_clock[..3]);
+                payload[6] = range.min_vfreq_hz;
+                payload[7] = (range.max_vfreq_hz & 0xFF) as u8;
+                let flags_base = payload[8] & 0x7C;
+                let seamless_bit = u8::from(range.seamless_dynamic_video_timing) << 7;
+                let upper_vfreq = ((range.max_vfreq_hz >> 8) & 0x03) as u8;
+                payload[8] = flags_base | seamless_bit | upper_vfreq;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
                 })
             }
             _ => Err(ExtensionWriteError::InvalidDisplayIdTag { tag }),
@@ -827,6 +907,50 @@ fn decode_display_parameters(
     })
 }
 
+fn decode_dynamic_video_timing_range(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdDynamicVideoTimingRange, ExtensionError> {
+    if block.payload.len() < 9 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 9,
+            multiple: 0,
+        });
+    }
+    let bytes = &block.payload;
+    let min_pixel_clock_khz = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) + 1;
+    let max_pixel_clock_khz = u32::from_le_bytes([bytes[3], bytes[4], bytes[5], 0]) + 1;
+    let min_vfreq_hz = bytes[6];
+    let max_vfreq_lower = bytes[7];
+    let flags = bytes[8];
+    let max_vfreq_upper = (flags & 0x03) as u16;
+    let max_vfreq_hz = (max_vfreq_upper << 8) | u16::from(max_vfreq_lower);
+    let seamless_dynamic_video_timing = (flags & 0x80) != 0;
+
+    if min_pixel_clock_khz > max_pixel_clock_khz {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "min pixel clock exceeds max pixel clock",
+        });
+    }
+    if min_vfreq_hz == 0 || max_vfreq_hz == 0 || u16::from(min_vfreq_hz) > max_vfreq_hz {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "min refresh rate exceeds max refresh rate or is zero",
+        });
+    }
+
+    Ok(DisplayIdDynamicVideoTimingRange {
+        min_pixel_clock_khz,
+        max_pixel_clock_khz,
+        min_vfreq_hz,
+        max_vfreq_hz,
+        seamless_dynamic_video_timing,
+        raw: block.payload.clone(),
+    })
+}
+
 /// Errors returned while reading an extension's structured view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -938,6 +1062,13 @@ pub enum ExtensionError {
         /// Maximum refresh rate in Hz.
         max_refresh_hz: u8,
     },
+    /// DisplayID Dynamic Video Timing Range block has an invalid range (min > max or out of range).
+    InvalidDisplayIdDynamicRange {
+        /// DisplayID data-block tag.
+        tag: u8,
+        /// Detail description of the invalid range constraint.
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -973,6 +1104,10 @@ impl std::fmt::Display for ExtensionError {
             Self::TruncatedDisplayIdDataBlockHeader { offset, available } => write!(
                 f,
                 "DisplayID data-block header at offset {offset} has only {available} bytes"
+            ),
+            Self::InvalidDisplayIdDynamicRange { tag, reason } => write!(
+                f,
+                "DisplayID dynamic range data block 0x{tag:02X} has invalid range: {reason}"
             ),
             Self::TruncatedDataBlock { offset, length } => write!(
                 f,
@@ -1246,6 +1381,37 @@ impl EdidBlock {
         parse_display_id_data_blocks(&self.raw[5..5 + header.payload_length], 5)
     }
 
+    /// Read all Dynamic Video Timing Range Limits from DisplayID extension blocks.
+    pub fn display_id_dynamic_video_timing_ranges(
+        &self,
+    ) -> Result<Vec<DisplayIdDynamicVideoTimingRange>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut ranges = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::DynamicVideoTimingRange { range } = block.view()? {
+                ranges.push(range);
+            }
+        }
+        Ok(ranges)
+    }
+
+    /// Read detailed timings from this DisplayID extension block.
+    pub fn display_id_detailed_timings(
+        &self,
+    ) -> Result<Vec<DisplayIdDetailedTiming>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut timings = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::DetailedTiming {
+                timings: block_timings,
+            } = block.view()?
+            {
+                timings.extend(block_timings);
+            }
+        }
+        Ok(timings)
+    }
+
     /// Read the CTA-861 data-block collection without modifying the block.
     pub fn cta_data_blocks(&self) -> Result<Vec<CtaDataBlock>, ExtensionError> {
         if self.raw[0] != 0x02 {
@@ -1478,8 +1644,8 @@ mod tests {
         CtaAdaptiveSync, CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
         CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
         CtaVideoMode, CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView,
-        DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError,
-        ExtensionKind, ExtensionWriteError,
+        DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange,
+        DisplayIdHeader, ExtensionError, ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -1766,6 +1932,82 @@ mod tests {
         assert!(matches!(
             CtaY420Support::resolve_from_blocks(&no_vdb_blocks),
             Err(ExtensionError::Y420CapabilityMapMissingVideoDataBlock)
+        ));
+    }
+
+    #[test]
+    fn display_id_dynamic_video_timing_range_roundtrip_query_and_rejection() {
+        // 1. Decode valid Tag 0x25 block (451,310 kHz, 48-165 Hz, seamless = true)
+        // 451,310 kHz -> minus 1 is 451,309 = 0x06E2ED -> bytes [0xED, 0xE2, 0x06]
+        // 48 Hz min -> 0x30
+        // 165 Hz max -> 165 = 0x00A5 -> lower 0xA5, upper 0x00
+        // seamless flag -> bit 7 = 0x80
+        let payload = vec![
+            0xED, 0xE2, 0x06, // min pixel clock (451,310 kHz)
+            0xED, 0xE2, 0x06, // max pixel clock (451,310 kHz)
+            48,   // min vfreq
+            165,  // max vfreq lower
+            0x80, // seamless flag
+        ];
+        let block = DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::DynamicVideoTimingRange { range } = &view else {
+            panic!("expected DynamicVideoTimingRange view");
+        };
+        assert_eq!(range.min_pixel_clock_khz, 451_310);
+        assert_eq!(range.max_pixel_clock_khz, 451_310);
+        assert_eq!(range.min_vfreq_hz, 48);
+        assert_eq!(range.max_vfreq_hz, 165);
+        assert!(range.seamless_dynamic_video_timing);
+        assert_eq!(range.raw, payload);
+
+        // Lossless round-trip
+        let encoded = view.to_data_block().unwrap();
+        assert_eq!(encoded, block);
+
+        // Query from EdidBlock
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let ranges = edid_block.display_id_dynamic_video_timing_ranges().unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].min_vfreq_hz, 48);
+        assert_eq!(ranges[0].max_vfreq_hz, 165);
+        // Mutation test
+        let mut modified_range: DisplayIdDynamicVideoTimingRange = range.clone();
+        modified_range.max_vfreq_hz = 240;
+        modified_range.seamless_dynamic_video_timing = false;
+        let modified_view = DisplayIdDataBlockView::DynamicVideoTimingRange {
+            range: modified_range,
+        };
+        let modified_block = modified_view.to_data_block().unwrap();
+        assert_eq!(modified_block.payload[7], 240);
+        assert_eq!(modified_block.payload[8], 0x00);
+
+        // Rejection tests: min clock > max clock
+        let invalid_clock = DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xFF, 0xE2, 0x06, 0x00, 0xE2, 0x06, 48, 165, 0x80],
+        };
+        assert!(matches!(
+            invalid_clock.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+
+        // Rejection tests: min vfreq > max vfreq
+        let invalid_vfreq = DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 165, 48, 0x80],
+        };
+        assert!(matches!(
+            invalid_vfreq.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
         ));
     }
 

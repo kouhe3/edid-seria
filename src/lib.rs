@@ -28,8 +28,8 @@ pub use extensions::{
     CtaAdaptiveSync, CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
     CtaExtendedDataBlockView, CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock,
     CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView,
-    DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError,
-    ExtensionKind, ExtensionWriteError,
+    DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange,
+    DisplayIdHeader, ExtensionError, ExtensionKind, ExtensionWriteError,
 };
 pub use metadata::{
     AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,
