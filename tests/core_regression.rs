@@ -147,6 +147,37 @@ fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
         })
     ));
 
+    let y420_video = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x0E, 96, 97],
+    };
+    assert_eq!(
+        y420_video.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420Video {
+            modes: vec![
+                CtaVideoMode {
+                    vic: 96,
+                    native: false,
+                },
+                CtaVideoMode {
+                    vic: 97,
+                    native: false,
+                },
+            ],
+        })
+    );
+
+    let y420_cmdb = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x0F, 0x01],
+    };
+    assert_eq!(
+        y420_cmdb.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420CapabilityMap {
+            raw: vec![0x0F, 0x01],
+        })
+    );
+
     let unknown = CtaDataBlock {
         tag: 5,
         payload: vec![0xAA, 0xBB],

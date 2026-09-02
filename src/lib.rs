@@ -27,7 +27,7 @@ pub use error::{
 pub use extensions::{
     CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
     CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
-    DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
+    CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
     DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
     ExtensionWriteError,
 };

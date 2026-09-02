@@ -270,6 +270,16 @@ pub enum CtaExtendedDataBlockView {
         /// Original extended-tag-prefixed payload.
         raw: Vec<u8>,
     },
+    /// YCbCr 4:2:0 Video Data Block, extended tag 0x0E.
+    Y420Video {
+        /// 4:2:0-only Video Identification Code entries.
+        modes: Vec<CtaVideoMode>,
+    },
+    /// YCbCr 4:2:0 Capability Map Data Block, extended tag 0x0F.
+    Y420CapabilityMap {
+        /// Original extended-tag-prefixed payload.
+        raw: Vec<u8>,
+    },
     /// CTA Adaptive-Sync Data Block, extended tag 0x1A; raw fields retained.
     AdaptiveSync {
         /// Original extended-tag-prefixed payload.
@@ -282,6 +292,104 @@ pub enum CtaExtendedDataBlockView {
         /// Payload bytes after the extended tag.
         payload: Vec<u8>,
     },
+}
+
+/// Resolved CTA-861 YCbCr 4:2:0 video capabilities for a CTA data collection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtaY420Support {
+    /// Video modes from regular Video Data Blocks that also support YCbCr 4:2:0 (via Capability Map).
+    pub capability_map_modes: Vec<CtaVideoMode>,
+    /// Video modes that only support YCbCr 4:2:0 (from Y420 Video Data Blocks).
+    pub only_420_modes: Vec<CtaVideoMode>,
+}
+
+impl CtaY420Support {
+    /// Resolve YCbCr 4:2:0 video capabilities across a collection of CTA data blocks.
+    pub fn resolve_from_blocks(blocks: &[CtaDataBlock]) -> Result<Self, ExtensionError> {
+        let mut standard_svds = Vec::new();
+        let mut only_420_modes = Vec::new();
+        let mut capability_maps = Vec::new();
+
+        for block in blocks {
+            match block.view()? {
+                CtaDataBlockView::Video { modes } => {
+                    standard_svds.extend(modes);
+                }
+                CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420Video { modes }) => {
+                    only_420_modes.extend(modes);
+                }
+                CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420CapabilityMap { raw }) => {
+                    capability_maps.push(raw);
+                }
+                _ => {}
+            }
+        }
+
+        let mut capability_map_modes = Vec::new();
+        if !capability_maps.is_empty() {
+            if standard_svds.is_empty() {
+                return Err(ExtensionError::Y420CapabilityMapMissingVideoDataBlock);
+            }
+            for raw in &capability_maps {
+                if raw.len() <= 1 {
+                    for &mode in &standard_svds {
+                        if !capability_map_modes.contains(&mode) {
+                            capability_map_modes.push(mode);
+                        }
+                    }
+                } else {
+                    for (byte_offset, &byte) in raw[1..].iter().enumerate() {
+                        for bit in 0..8 {
+                            if (byte & (1 << bit)) != 0 {
+                                let svd_index = byte_offset * 8 + bit;
+                                if svd_index >= standard_svds.len() {
+                                    return Err(ExtensionError::Y420CapabilityMapIndexOutOfRange {
+                                        index: svd_index,
+                                        available_svds: standard_svds.len(),
+                                    });
+                                }
+                                let mode = standard_svds[svd_index];
+                                if !capability_map_modes.contains(&mode) {
+                                    capability_map_modes.push(mode);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            capability_map_modes,
+            only_420_modes,
+        })
+    }
+
+    /// Returns all VICs supporting YCbCr 4:2:0 without duplicates.
+    #[must_use]
+    pub fn all_420_vics(&self) -> Vec<u8> {
+        let mut vics = Vec::new();
+        for mode in self.capability_map_modes.iter().chain(&self.only_420_modes) {
+            if !vics.contains(&mode.vic) {
+                vics.push(mode.vic);
+            }
+        }
+        vics
+    }
+
+    /// Returns whether the specified VIC supports YCbCr 4:2:0.
+    #[must_use]
+    pub fn supports_vic(&self, vic: u8) -> bool {
+        self.capability_map_modes.iter().any(|m| m.vic == vic)
+            || self.only_420_modes.iter().any(|m| m.vic == vic)
+    }
+
+    /// Returns whether the specified VIC is 4:2:0-only.
+    #[must_use]
+    pub fn is_420_only(&self, vic: u8) -> bool {
+        self.only_420_modes.iter().any(|m| m.vic == vic)
+            && !self.capability_map_modes.iter().any(|m| m.vic == vic)
+    }
 }
 fn vendor_payload_template(
     raw: &[u8],
@@ -464,6 +572,40 @@ impl CtaDataBlockView {
                 if raw.first().copied() != Some(0x1A) {
                     return Err(ExtensionWriteError::InvalidCtaExtendedPayload {
                         expected_tag: 0x1A,
+                        actual_tag: raw.first().copied(),
+                        length: raw.len(),
+                    });
+                }
+                Ok(CtaDataBlock {
+                    tag: 7,
+                    payload: raw.clone(),
+                })
+            }
+            Self::Extended(CtaExtendedDataBlockView::Y420Video { modes }) => {
+                if modes.is_empty() {
+                    return Err(ExtensionWriteError::CtaPayloadTooShort {
+                        tag: 7,
+                        length: 0,
+                        minimum: 1,
+                    });
+                }
+                let mut payload = Vec::with_capacity(modes.len() + 1);
+                payload.push(0x0E);
+                for (index, mode) in modes.iter().enumerate() {
+                    if !(1..=127).contains(&mode.vic) {
+                        return Err(ExtensionWriteError::InvalidCtaVideoCode {
+                            index,
+                            vic: mode.vic,
+                        });
+                    }
+                    payload.push(mode.vic | (u8::from(mode.native) << 7));
+                }
+                Ok(CtaDataBlock { tag: 7, payload })
+            }
+            Self::Extended(CtaExtendedDataBlockView::Y420CapabilityMap { raw }) => {
+                if raw.first().copied() != Some(0x0F) {
+                    return Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                        expected_tag: 0x0F,
                         actual_tag: raw.first().copied(),
                         length: raw.len(),
                     });
@@ -820,6 +962,34 @@ impl CtaDataBlock {
                     },
                 ))
             }
+            0x0E => {
+                if self.payload.len() < 2 {
+                    return Err(ExtensionError::TruncatedExtendedDataBlock {
+                        extended_tag,
+                        length: self.payload.len(),
+                        minimum: 2,
+                    });
+                }
+                let mut modes = Vec::with_capacity(self.payload.len() - 1);
+                for (index, &code) in self.payload[1..].iter().enumerate() {
+                    let vic = code & 0x7F;
+                    if vic == 0 {
+                        return Err(ExtensionError::InvalidVideoCode { index });
+                    }
+                    modes.push(CtaVideoMode {
+                        vic,
+                        native: code & 0x80 != 0,
+                    });
+                }
+                Ok(CtaDataBlockView::Extended(
+                    CtaExtendedDataBlockView::Y420Video { modes },
+                ))
+            }
+            0x0F => Ok(CtaDataBlockView::Extended(
+                CtaExtendedDataBlockView::Y420CapabilityMap {
+                    raw: self.payload.clone(),
+                },
+            )),
             0x1A => Ok(CtaDataBlockView::Extended(
                 CtaExtendedDataBlockView::AdaptiveSync {
                     raw: self.payload.clone(),

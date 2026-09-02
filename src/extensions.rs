@@ -7,6 +7,7 @@ mod cta;
 pub use cta::{
     CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
     CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
+    CtaY420Support,
 };
 
 /// Recognized kind of an EDID extension block.
@@ -907,6 +908,15 @@ pub enum ExtensionError {
         /// Actual payload length.
         length: usize,
     },
+    /// A CTA YCbCr 4:2:0 Capability Map references an SVD index that does not exist in the collection.
+    Y420CapabilityMapIndexOutOfRange {
+        /// SVD index indicated by the capability map (zero-based).
+        index: usize,
+        /// Total number of SVD entries available in regular Video Data Blocks.
+        available_svds: usize,
+    },
+    /// A CTA YCbCr 4:2:0 Capability Map is present but no Video Data Block exists.
+    Y420CapabilityMapMissingVideoDataBlock,
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -984,6 +994,16 @@ impl std::fmt::Display for ExtensionError {
                 f,
                 "CTA speaker allocation data block has invalid payload length {length}"
             ),
+            Self::Y420CapabilityMapIndexOutOfRange {
+                index,
+                available_svds,
+            } => write!(
+                f,
+                "CTA Y420 capability map references SVD index {index} but only {available_svds} are available"
+            ),
+            Self::Y420CapabilityMapMissingVideoDataBlock => {
+                f.write_str("CTA Y420 capability map is present without any Video Data Block")
+            }
         }
     }
 }
@@ -1211,6 +1231,12 @@ impl EdidBlock {
         parse_cta_data_blocks(&self.raw[4..end], 4, dtd_offset == 0)
     }
 
+    /// Query resolved YCbCr 4:2:0 capabilities for this CTA-861 block.
+    pub fn cta_y420_support(&self) -> Result<CtaY420Support, ExtensionError> {
+        let blocks = self.cta_data_blocks()?;
+        CtaY420Support::resolve_from_blocks(&blocks)
+    }
+
     /// Read and validate the CTA-861 extension header and capability flags.
     pub fn cta_header(&self) -> Result<CtaHeader, ExtensionError> {
         if self.raw[0] != 0x02 {
@@ -1425,9 +1451,9 @@ mod tests {
     use super::{
         CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
         CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
-        CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
-        DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
-        ExtensionWriteError,
+        CtaVideoMode, CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView,
+        DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError,
+        ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -1548,6 +1574,75 @@ mod tests {
                 raw: vec![0x1A, 0x01, 0x02],
             })
         );
+    }
+
+    #[test]
+    fn cta_y420_video_and_capability_map_roundtrip_and_query() {
+        let vdb = CtaDataBlock {
+            tag: 2,
+            payload: vec![16, 97, 107], // SVD 0: VIC 16, SVD 1: VIC 97, SVD 2: VIC 107
+        };
+        let y420_vdb = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x0E, 96], // VIC 96 (4:2:0 only)
+        };
+        let y420_cmdb = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x0F, 0b0000_0010], // SVD 1 (VIC 97) is 4:2:0 capable
+        };
+
+        // Verify views
+        let y420_vdb_view = y420_vdb.view().unwrap();
+        assert_eq!(
+            y420_vdb_view,
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420Video {
+                modes: vec![CtaVideoMode {
+                    vic: 96,
+                    native: false
+                }]
+            })
+        );
+        assert_eq!(y420_vdb_view.to_data_block().unwrap(), y420_vdb);
+
+        let y420_cmdb_view = y420_cmdb.view().unwrap();
+        assert_eq!(
+            y420_cmdb_view,
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420CapabilityMap {
+                raw: vec![0x0F, 0b0000_0010],
+            })
+        );
+        assert_eq!(y420_cmdb_view.to_data_block().unwrap(), y420_cmdb);
+
+        // Test resolution
+        let blocks = vec![vdb.clone(), y420_vdb.clone(), y420_cmdb.clone()];
+        let support = CtaY420Support::resolve_from_blocks(&blocks).unwrap();
+        assert!(!support.supports_vic(16));
+        assert!(support.supports_vic(97));
+        assert!(!support.is_420_only(97));
+        assert!(support.supports_vic(96));
+        assert!(support.is_420_only(96));
+        assert_eq!(support.all_420_vics(), vec![97, 96]);
+
+        // Test out of range error
+        let invalid_cmdb = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x0F, 0b0001_0000], // SVD 4 (out of range, only 3 exist)
+        };
+        let err_blocks = vec![vdb.clone(), invalid_cmdb];
+        assert!(matches!(
+            CtaY420Support::resolve_from_blocks(&err_blocks),
+            Err(ExtensionError::Y420CapabilityMapIndexOutOfRange {
+                index: 4,
+                available_svds: 3
+            })
+        ));
+
+        // Test missing VDB error
+        let no_vdb_blocks = vec![y420_cmdb];
+        assert!(matches!(
+            CtaY420Support::resolve_from_blocks(&no_vdb_blocks),
+            Err(ExtensionError::Y420CapabilityMapMissingVideoDataBlock)
+        ));
     }
 
     #[test]
