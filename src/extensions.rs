@@ -2083,6 +2083,7 @@ mod tests {
                 scdc_flags,
                 deep_color_420_flags,
                 raw,
+                ..
             }) => {
                 assert_eq!(version, 1);
                 assert_eq!(max_tmds_character_rate_mhz, Some(600)); // 0x78 * 5 = 120 * 5 = 600
@@ -2115,6 +2116,159 @@ mod tests {
         assert!(matches!(
             truncated.view(),
             Err(ExtensionError::TruncatedVendorSpecificDataBlock { length: 2 })
+        ));
+    }
+
+    #[test]
+    fn hdmi_forum_modern_features_and_short_vsdb_roundtrip() {
+        // 1. Short HDMI 2.0 HF-VSDB (8 bytes)
+        let short_payload = vec![0xD8, 0x5D, 0xC4, 1, 120, 0xDC, 0x00, 0x01];
+        let short_block = CtaDataBlock {
+            tag: 3,
+            payload: short_payload.clone(),
+        };
+        let short_view = short_block.view().unwrap();
+        let CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::HdmiForum {
+            version,
+            max_tmds_character_rate_mhz,
+            scdc_flags,
+            max_frl_rate,
+            deep_color_420_flags,
+            vrr_flags,
+            vrr_min_hz,
+            vrr_max_hz,
+            dsc_flags,
+            dsc_max_slices,
+            dsc_total_chunk_kbytes,
+            raw,
+        }) = &short_view
+        else {
+            panic!("expected HdmiForum view");
+        };
+        assert_eq!(*version, 1);
+        assert_eq!(*max_tmds_character_rate_mhz, Some(600));
+        assert_eq!(*scdc_flags, 0xDC);
+        assert_eq!(*max_frl_rate, Some(0));
+        assert_eq!(*deep_color_420_flags, 0x01);
+        assert_eq!(*vrr_flags, None);
+        assert_eq!(*vrr_min_hz, None);
+        assert_eq!(*vrr_max_hz, None);
+        assert_eq!(*dsc_flags, None);
+        assert_eq!(*dsc_max_slices, None);
+        assert_eq!(*dsc_total_chunk_kbytes, None);
+        assert_eq!(*raw, short_payload);
+
+        // Lossless round-trip of short HF-VSDB
+        let encoded_short = short_view.to_data_block().unwrap();
+        assert_eq!(encoded_short.payload, short_payload);
+
+        // 2. Full HDMI 2.1 HF-VSDB (14 bytes)
+        // Byte 0..2: 0xD8, 0x5D, 0xC4
+        // Byte 3: version 1
+        // Byte 4: TMDS character rate 600 MHz (0x78 = 120)
+        // Byte 5: SCDC 0xDC
+        // Byte 6: FRL 6 (48Gbps: 0x60)
+        // Byte 7: DC 4:2:0 0x07 (30, 36, 48 bit)
+        // Byte 8: ALLM + FVA + Cinema VRR (0b0001_0110: ALLM bit 1, FVA bit 2, Cinema VRR bit 4)
+        // Byte 9: VRR min 48 Hz (0x30) + VRR max upper 0 (0x30)
+        // Byte 10: VRR max lower 144 (0x90)
+        // Byte 11: DSC 1.2 flags (0x87)
+        // Byte 12: DSC max slices (0x44: 4 slices, FRL 4)
+        // Byte 13: DSC total chunk kbytes (0x10: 16 KB)
+        let full_payload = vec![
+            0xD8,
+            0x5D,
+            0xC4,
+            1,
+            120,
+            0xDC,
+            0x60,
+            0x07,
+            0b0001_0110,
+            0x30,
+            0x90,
+            0x87,
+            0x44,
+            0x10,
+        ];
+        let full_block = CtaDataBlock {
+            tag: 3,
+            payload: full_payload.clone(),
+        };
+        let full_view = full_block.view().unwrap();
+        let CtaDataBlockView::VendorSpecific(full_vsdb) = full_view.clone() else {
+            panic!("expected HdmiForum view");
+        };
+        assert!(full_vsdb.is_allm_supported());
+        assert!(full_vsdb.is_fva_supported());
+        assert!(full_vsdb.is_cinema_vrr_supported());
+        if let CtaVendorSpecificBlock::HdmiForum {
+            max_frl_rate,
+            vrr_min_hz,
+            vrr_max_hz,
+            dsc_flags,
+            ..
+        } = &full_vsdb
+        {
+            assert_eq!(*max_frl_rate, Some(6));
+            assert_eq!(*vrr_min_hz, Some(48));
+            assert_eq!(*vrr_max_hz, Some(144));
+            assert_eq!(*dsc_flags, Some(0x87));
+        }
+
+        // Lossless round-trip of full HF-VSDB
+        let encoded_full = full_view.to_data_block().unwrap();
+        assert_eq!(encoded_full.payload, full_payload);
+
+        // Modifying fields updates encoded bytes
+        let mut modified = full_vsdb.clone();
+        if let CtaVendorSpecificBlock::HdmiForum {
+            max_frl_rate,
+            vrr_max_hz,
+            ..
+        } = &mut modified
+        {
+            *max_frl_rate = Some(5);
+            *vrr_max_hz = Some(240);
+        }
+        let modified_encoded = CtaDataBlockView::VendorSpecific(modified)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(modified_encoded.payload[6], 0x50);
+        assert_eq!(modified_encoded.payload[9], 0x30); // upper 2 bits of 240 is 0
+        assert_eq!(modified_encoded.payload[10], 240); // 0xF0
+
+        // Rejection tests: FRL > 6
+        let mut invalid_frl = full_vsdb.clone();
+        if let CtaVendorSpecificBlock::HdmiForum { max_frl_rate, .. } = &mut invalid_frl {
+            *max_frl_rate = Some(7);
+        }
+        assert!(matches!(
+            CtaDataBlockView::VendorSpecific(invalid_frl).to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaField {
+                field: "max_frl_rate",
+                value: 7,
+                maximum: 6
+            })
+        ));
+
+        // Rejection tests: VRR min > max
+        let mut invalid_vrr = full_vsdb.clone();
+        if let CtaVendorSpecificBlock::HdmiForum {
+            vrr_min_hz,
+            vrr_max_hz,
+            ..
+        } = &mut invalid_vrr
+        {
+            *vrr_min_hz = Some(60);
+            *vrr_max_hz = Some(48);
+        }
+        assert!(matches!(
+            CtaDataBlockView::VendorSpecific(invalid_vrr).to_data_block(),
+            Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz: 60,
+                max_refresh_hz: 48
+            })
         ));
     }
 
@@ -2766,7 +2920,14 @@ mod tests {
             version: 1,
             max_tmds_character_rate_mhz: Some(701),
             scdc_flags: 0,
+            max_frl_rate: None,
             deep_color_420_flags: 0,
+            vrr_flags: None,
+            vrr_min_hz: None,
+            vrr_max_hz: None,
+            dsc_flags: None,
+            dsc_max_slices: None,
+            dsc_total_chunk_kbytes: None,
             raw: vec![0xD8, 0x5D, 0xC4, 1, 0, 0, 0, 0],
         });
         assert!(matches!(

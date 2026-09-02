@@ -187,8 +187,22 @@ pub enum CtaVendorSpecificBlock {
         max_tmds_character_rate_mhz: Option<u16>,
         /// SCDC and scrambling capability flags (byte 5).
         scdc_flags: u8,
+        /// Maximum Fixed Rate Link rate code (0..=6), if present (byte 6 bits 7..4).
+        max_frl_rate: Option<u8>,
         /// Deep Color 4:2:0 support flags (byte 7).
         deep_color_420_flags: u8,
+        /// VRR, ALLM, FVA, and gaming capability flags (byte 8), if present.
+        vrr_flags: Option<u8>,
+        /// Minimum supported VRR refresh rate in Hz (byte 9 bits 0..5), if present.
+        vrr_min_hz: Option<u8>,
+        /// Maximum supported VRR refresh rate in Hz (byte 9 bits 6..7 + byte 10), if present.
+        vrr_max_hz: Option<u16>,
+        /// DSC 1.2 capability flags (byte 11), if present.
+        dsc_flags: Option<u8>,
+        /// DSC max slices and max FRL rate (byte 12), if present.
+        dsc_max_slices: Option<u8>,
+        /// DSC total chunk kbytes (byte 13), if present.
+        dsc_total_chunk_kbytes: Option<u8>,
         /// Original payload including the 3-byte OUI.
         raw: Vec<u8>,
     },
@@ -219,6 +233,35 @@ pub enum CtaVendorSpecificBlock {
         /// Payload bytes after the 3-byte OUI.
         payload: Vec<u8>,
     },
+}
+
+impl CtaVendorSpecificBlock {
+    /// Return whether this VSDB represents HDMI Forum with ALLM (Auto Low Latency Mode).
+    #[must_use]
+    pub fn is_allm_supported(&self) -> bool {
+        match self {
+            Self::HdmiForum { vrr_flags, .. } => vrr_flags.is_some_and(|f| (f & (1 << 1)) != 0),
+            _ => false,
+        }
+    }
+
+    /// Return whether this VSDB represents HDMI Forum with Fast Vactive (FVA).
+    #[must_use]
+    pub fn is_fva_supported(&self) -> bool {
+        match self {
+            Self::HdmiForum { vrr_flags, .. } => vrr_flags.is_some_and(|f| (f & (1 << 2)) != 0),
+            _ => false,
+        }
+    }
+
+    /// Return whether this VSDB represents HDMI Forum with Cinema VRR.
+    #[must_use]
+    pub fn is_cinema_vrr_supported(&self) -> bool {
+        match self {
+            Self::HdmiForum { vrr_flags, .. } => vrr_flags.is_some_and(|f| (f & (1 << 4)) != 0),
+            _ => false,
+        }
+    }
 }
 
 /// Typed read-only views for CTA data blocks.
@@ -690,7 +733,14 @@ impl CtaDataBlockView {
                 version,
                 max_tmds_character_rate_mhz,
                 scdc_flags,
+                max_frl_rate,
                 deep_color_420_flags,
+                vrr_flags,
+                vrr_min_hz,
+                vrr_max_hz,
+                dsc_flags,
+                dsc_max_slices,
+                dsc_total_chunk_kbytes,
                 raw,
             }) => {
                 let mut payload = vendor_payload_template(raw, [0xD8, 0x5D, 0xC4])?;
@@ -703,7 +753,113 @@ impl CtaDataBlockView {
                     "max_tmds_character_rate_mhz",
                 )?;
                 write_vendor_byte(&mut payload, raw, 5, *scdc_flags, 0)?;
+                if let Some(frl) = *max_frl_rate {
+                    if frl > 6 {
+                        return Err(ExtensionWriteError::InvalidCtaField {
+                            field: "max_frl_rate",
+                            value: frl,
+                            maximum: 6,
+                        });
+                    }
+                    if raw.len() <= 6 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 7,
+                        });
+                    }
+                    payload[6] = (payload[6] & 0x0F) | (frl << 4);
+                } else if raw.len() > 6 && (raw[6] >> 4) != 0 {
+                    return Err(ExtensionWriteError::InvalidCtaVendorField {
+                        field: "max_frl_rate",
+                    });
+                }
                 write_vendor_byte(&mut payload, raw, 7, *deep_color_420_flags, 0)?;
+                if let Some(flags) = *vrr_flags {
+                    if raw.len() <= 8 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 9,
+                        });
+                    }
+                    payload[8] = flags;
+                } else if raw.len() > 8 && raw[8] != 0 {
+                    return Err(ExtensionWriteError::InvalidCtaVendorField { field: "vrr_flags" });
+                }
+                if let (Some(min), Some(max)) = (*vrr_min_hz, *vrr_max_hz)
+                    && max > 0
+                    && u16::from(min) > max
+                {
+                    return Err(ExtensionWriteError::InvalidRefreshRateRange {
+                        min_refresh_hz: min,
+                        max_refresh_hz: max as u8,
+                    });
+                }
+                if let Some(min) = *vrr_min_hz {
+                    if min > 63 {
+                        return Err(ExtensionWriteError::InvalidCtaField {
+                            field: "vrr_min_hz",
+                            value: min,
+                            maximum: 63,
+                        });
+                    }
+                    if raw.len() <= 9 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 10,
+                        });
+                    }
+                    payload[9] = (payload[9] & 0xC0) | (min & 0x3F);
+                }
+                if let Some(max) = *vrr_max_hz {
+                    if max > 1023 {
+                        return Err(ExtensionWriteError::InvalidCtaVendorField {
+                            field: "vrr_max_hz",
+                        });
+                    }
+                    if raw.len() <= 10 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 11,
+                        });
+                    }
+                    let upper = ((max >> 8) & 0x03) as u8;
+                    payload[9] = (payload[9] & 0x3F) | (upper << 6);
+                    payload[10] = (max & 0xFF) as u8;
+                }
+                if let Some(flags) = *dsc_flags {
+                    if raw.len() <= 11 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 12,
+                        });
+                    }
+                    payload[11] = flags;
+                }
+                if let Some(slices) = *dsc_max_slices {
+                    if raw.len() <= 12 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 13,
+                        });
+                    }
+                    payload[12] = slices;
+                }
+                if let Some(chunks) = *dsc_total_chunk_kbytes {
+                    if raw.len() <= 13 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 14,
+                        });
+                    }
+                    payload[13] = chunks;
+                }
                 Ok(CtaDataBlock { tag: 3, payload })
             }
             Self::VendorSpecific(CtaVendorSpecificBlock::AmdFreeSync {
@@ -1111,13 +1267,34 @@ impl CtaDataBlock {
                     .filter(|&b| b != 0)
                     .map(|b| b as u16 * 5);
                 let scdc_flags = self.payload.get(5).copied().unwrap_or(0);
+                let max_frl_rate = self.payload.get(6).map(|&b| b >> 4);
                 let deep_color_420_flags = self.payload.get(7).copied().unwrap_or(0);
+                let vrr_flags = self.payload.get(8).copied();
+                let vrr_min_hz = self.payload.get(9).map(|&b| b & 0x3F).filter(|&b| b != 0);
+                let vrr_max_hz = if self.payload.len() >= 11 {
+                    let b9 = self.payload[9];
+                    let b10 = self.payload[10];
+                    let max = (u16::from(b9 & 0xC0) << 2) | u16::from(b10);
+                    if max != 0 { Some(max) } else { None }
+                } else {
+                    None
+                };
+                let dsc_flags = self.payload.get(11).copied();
+                let dsc_max_slices = self.payload.get(12).copied();
+                let dsc_total_chunk_kbytes = self.payload.get(13).copied();
                 Ok(CtaDataBlockView::VendorSpecific(
                     CtaVendorSpecificBlock::HdmiForum {
                         version,
                         max_tmds_character_rate_mhz,
                         scdc_flags,
+                        max_frl_rate,
                         deep_color_420_flags,
+                        vrr_flags,
+                        vrr_min_hz,
+                        vrr_max_hz,
+                        dsc_flags,
+                        dsc_max_slices,
+                        dsc_total_chunk_kbytes,
                         raw: self.payload.clone(),
                     },
                 ))
