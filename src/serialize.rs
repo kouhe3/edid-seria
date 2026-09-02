@@ -19,6 +19,43 @@ pub enum TimingKind {
     Hdtv,
 }
 
+/// Strategy for automatically creating or extending CTA-861 and DisplayID extension blocks.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ExtensionPolicy {
+    /// Only write to the 4 Base Block DTD slots (legacy behavior).
+    BaseOnly,
+    /// Automatically allocate overflow timings to CTA-861 DTDs, and
+    /// DTD-incompatible timings (e.g. v_front > 63) to DisplayID Detailed Timings.
+    #[default]
+    Auto,
+    /// Prefer CTA-861 extension blocks for DTD-compatible timings.
+    /// Returns an error if any timing cannot be represented as a DTD.
+    PreferCta,
+    /// Prefer DisplayID extension blocks for all overflow and DTD-incompatible timings.
+    PreferDisplayId,
+}
+
+/// Options controlling high-level resolution and timing serialization.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SerializeOptions {
+    /// Policy for creating or appending extension blocks.
+    pub extension_policy: ExtensionPolicy,
+    /// Maximum allowed total EDID blocks (Base + Extensions, up to 256).
+    pub max_blocks: usize,
+    /// Whether to retain existing extension blocks from input EDID.
+    pub preserve_existing_extensions: bool,
+}
+
+impl Default for SerializeOptions {
+    fn default() -> Self {
+        Self {
+            extension_policy: ExtensionPolicy::Auto,
+            max_blocks: crate::edid::MAX_EDID_BLOCKS,
+            preserve_existing_extensions: true,
+        }
+    }
+}
+
 /// A user-requested resolution, before timing computation.
 #[derive(Copy, Clone, Debug, PartialEq)]
 /// A user-requested resolution, before timing computation.
@@ -120,6 +157,40 @@ pub fn serialize_timings(
 ) -> Result<SerializedEdid, SerializeError> {
     let blocks = parse_existing_blocks(existing)?;
     serialize_timing_blocks(blocks, timings)
+}
+
+/// Serialize resolutions into an EDID binary with automatic CTA/DisplayID extension generation.
+///
+/// When the base block's 4 DTD slots are filled or when timings exceed EDID 1.4 DTD constraints
+/// (such as CVT-RB2 high refresh rates with vertical front porch > 63), this function creates
+/// CTA-861 DTD extension blocks or DisplayID Type VII timing extension blocks according to `options.extension_policy`.
+pub fn serialize_resolutions_extended(
+    existing: Option<&[u8]>,
+    resolutions: &[ResolutionSpec],
+    options: &SerializeOptions,
+) -> Result<SerializedEdid, SerializeError> {
+    let blocks = parse_existing_blocks(existing)?;
+    let allow_extensions = options.extension_policy != ExtensionPolicy::BaseOnly;
+    let timings: Vec<DetailedTiming> = resolutions
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| timing_for_extended(index, spec, allow_extensions))
+        .collect::<Result<_, _>>()?;
+    serialize_extended_pipeline(blocks, &timings, options)
+}
+
+/// Serialize caller-provided detailed timings into an EDID binary with automatic extension generation.
+///
+/// Timings that fit standard DTDs are allocated to the base block first. Any overflow timings or
+/// timings exceeding DTD constraints are automatically split into CTA-861 (up to 6 DTDs per block)
+/// or DisplayID (up to 5 detailed timings per block) extension blocks according to `options.extension_policy`.
+pub fn serialize_timings_extended(
+    existing: Option<&[u8]>,
+    timings: &[DetailedTiming],
+    options: &SerializeOptions,
+) -> Result<SerializedEdid, SerializeError> {
+    let blocks = parse_existing_blocks(existing)?;
+    serialize_extended_pipeline(blocks, timings, options)
 }
 
 fn parse_existing_blocks(existing: Option<&[u8]>) -> Result<Vec<EdidBlock>, SerializeError> {
@@ -232,6 +303,165 @@ fn timing_for(spec: &ResolutionSpec) -> Option<DetailedTiming> {
         TimingKind::Pc => compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVTRB2),
     }?;
     dtd_fits(&timing).then_some(timing)
+}
+
+fn serialize_extended_pipeline(
+    mut blocks: Vec<EdidBlock>,
+    timings: &[DetailedTiming],
+    options: &SerializeOptions,
+) -> Result<SerializedEdid, SerializeError> {
+    validate_block_sequence(&blocks)?;
+
+    if !options.preserve_existing_extensions {
+        blocks.truncate(1);
+    }
+
+    if options.extension_policy == ExtensionPolicy::BaseOnly {
+        return serialize_timing_blocks(blocks, timings);
+    }
+
+    for (index, timing) in timings.iter().enumerate() {
+        if timing.pixel_clock_khz == 0 {
+            return Err(SerializeError::InvalidTiming {
+                index,
+                source: crate::error::DtdError::InvalidField {
+                    field: crate::error::DtdField::PixelClockKHz,
+                    value: 0,
+                },
+            });
+        }
+        if timing.h_active == 0 {
+            return Err(SerializeError::InvalidTiming {
+                index,
+                source: crate::error::DtdError::InvalidField {
+                    field: crate::error::DtdField::HorizontalActive,
+                    value: 0,
+                },
+            });
+        }
+        if timing.v_active == 0 {
+            return Err(SerializeError::InvalidTiming {
+                index,
+                source: crate::error::DtdError::InvalidField {
+                    field: crate::error::DtdField::VerticalActive,
+                    value: 0,
+                },
+            });
+        }
+        if !timing.v_rate.is_finite() {
+            return Err(SerializeError::TimingUnavailable { index });
+        }
+    }
+
+    let mut dtd_compatible = Vec::new();
+    let mut dtd_incompatible = Vec::new();
+
+    for (index, timing) in timings.iter().enumerate() {
+        if dtd_fits(timing) {
+            dtd_compatible.push(timing.clone());
+        } else {
+            if options.extension_policy == ExtensionPolicy::PreferCta {
+                return Err(SerializeError::TimingDoesNotFit { index });
+            }
+            dtd_incompatible.push(timing.clone());
+        }
+    }
+
+    let written_to_base = blocks[0].write_resolutions(&dtd_compatible);
+    let overflow_dtds = &dtd_compatible[written_to_base..];
+
+    match options.extension_policy {
+        ExtensionPolicy::Auto => {
+            for chunk in overflow_dtds.chunks(6) {
+                let cta_block = EdidBlock::from_cta_data_blocks_and_timings(3, &[], chunk)
+                    .map_err(|_| SerializeError::NoDtdSlot { index: 0 })?;
+                blocks.push(cta_block);
+            }
+            let did_timings: Vec<crate::extensions::DisplayIdDetailedTiming> = dtd_incompatible
+                .iter()
+                .map(|t| t.to_display_id(false))
+                .collect();
+            for chunk in did_timings.chunks(5) {
+                let view = crate::extensions::DisplayIdDataBlockView::DetailedTiming {
+                    timings: chunk.to_vec(),
+                };
+                let db = view
+                    .to_data_block()
+                    .map_err(|_| SerializeError::NoDtdSlot { index: 0 })?;
+                let did_block = EdidBlock::from_display_id_data_blocks(0x20, 0, 0, &[db])
+                    .map_err(|_| SerializeError::NoDtdSlot { index: 0 })?;
+                blocks.push(did_block);
+            }
+        }
+        ExtensionPolicy::PreferCta => {
+            for chunk in overflow_dtds.chunks(6) {
+                let cta_block = EdidBlock::from_cta_data_blocks_and_timings(3, &[], chunk)
+                    .map_err(|_| SerializeError::NoDtdSlot { index: 0 })?;
+                blocks.push(cta_block);
+            }
+        }
+        ExtensionPolicy::PreferDisplayId => {
+            let mut all_display_id: Vec<crate::extensions::DisplayIdDetailedTiming> = overflow_dtds
+                .iter()
+                .map(|t| t.to_display_id(false))
+                .collect();
+            all_display_id.extend(dtd_incompatible.iter().map(|t| t.to_display_id(false)));
+
+            for chunk in all_display_id.chunks(5) {
+                let view = crate::extensions::DisplayIdDataBlockView::DetailedTiming {
+                    timings: chunk.to_vec(),
+                };
+                let db = view
+                    .to_data_block()
+                    .map_err(|_| SerializeError::NoDtdSlot { index: 0 })?;
+                let did_block = EdidBlock::from_display_id_data_blocks(0x20, 0, 0, &[db])
+                    .map_err(|_| SerializeError::NoDtdSlot { index: 0 })?;
+                blocks.push(did_block);
+            }
+        }
+        ExtensionPolicy::BaseOnly => unreachable!(),
+    }
+
+    let total_blocks = blocks.len();
+    if total_blocks > options.max_blocks || total_blocks > crate::edid::MAX_EDID_BLOCKS {
+        return Err(SerializeError::TooManyExtensions {
+            count: total_blocks.saturating_sub(1),
+        });
+    }
+
+    blocks[0].raw[126] = (blocks.len() - 1) as u8;
+    for block in &mut blocks {
+        block.update_checksum();
+    }
+
+    Ok(SerializedEdid {
+        bytes: blocks.into_iter().flat_map(|block| block.raw).collect(),
+        written: timings.len(),
+        skipped: 0,
+    })
+}
+
+fn timing_for_extended(
+    index: usize,
+    spec: &ResolutionSpec,
+    allow_extensions: bool,
+) -> Result<DetailedTiming, SerializeError> {
+    if !spec.refresh.is_finite() {
+        return Err(SerializeError::TimingUnavailable { index });
+    }
+    let timing = match spec.kind {
+        TimingKind::Hdtv => {
+            DetailedTiming::compute_hdtv_blanking(spec.width, spec.height, spec.refresh)
+                .or_else(|| compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVT))
+        }
+        TimingKind::Pc => compute_cvt(spec.width, spec.height, spec.refresh, TimingFormula::CVTRB2),
+    }
+    .ok_or(SerializeError::TimingUnavailable { index })?;
+
+    if !allow_extensions && !dtd_fits(&timing) {
+        return Err(SerializeError::TimingDoesNotFit { index });
+    }
+    Ok(timing)
 }
 
 #[cfg(test)]
@@ -511,6 +741,182 @@ mod tests {
         assert!(matches!(
             serialize_resolutions_checked(Some(&oversized), &[]),
             Err(SerializeError::InvalidExistingLength { actual }) if actual == crate::edid::MAX_EDID_BYTES + EDID_BLOCK_SIZE
+        ));
+    }
+
+    #[test]
+    fn serialize_extended_base_only_rejects_overflow() {
+        let specs = vec![
+            spec(1920, 1080, 60.0, TimingKind::Hdtv),
+            spec(1280, 720, 60.0, TimingKind::Hdtv),
+            spec(800, 600, 60.0, TimingKind::Pc),
+            spec(640, 480, 60.0, TimingKind::Pc),
+            spec(1024, 768, 60.0, TimingKind::Pc),
+        ];
+        let opts = SerializeOptions {
+            extension_policy: ExtensionPolicy::BaseOnly,
+            ..Default::default()
+        };
+        let res = serialize_resolutions_extended(None, &specs, &opts);
+        assert!(matches!(res, Err(SerializeError::NoDtdSlot { index: 4 })));
+    }
+
+    #[test]
+    fn serialize_extended_auto_overflows_to_cta_extension() {
+        // 6 standard DTD resolutions: 4 in Base Block, 2 in CTA-861 Extension Block
+        let specs = vec![
+            spec(1920, 1080, 60.0, TimingKind::Hdtv),
+            spec(1280, 720, 60.0, TimingKind::Hdtv),
+            spec(800, 600, 60.0, TimingKind::Pc),
+            spec(640, 480, 60.0, TimingKind::Pc),
+            spec(1024, 768, 60.0, TimingKind::Pc),
+            spec(1600, 900, 60.0, TimingKind::Pc),
+        ];
+        let opts = SerializeOptions::default();
+        let out = serialize_resolutions_extended(None, &specs, &opts).unwrap();
+        assert_eq!(out.written, 6);
+        assert_eq!(out.bytes.len(), 2 * EDID_BLOCK_SIZE);
+        checksum_ok(&out.bytes);
+
+        // Base block extension count must be 1
+        assert_eq!(out.bytes[126], 1);
+
+        // Second block must be CTA-861 (tag 0x02)
+        assert_eq!(out.bytes[128], 0x02);
+
+        // Parse the CTA block and verify the 2 overflow DTDs
+        let cta_block = EdidBlock::from_bytes(&out.bytes[128..256]).unwrap();
+        let dtds = cta_block.cta_detailed_timings().unwrap();
+        assert_eq!(dtds.len(), 2);
+        assert_eq!(dtds[0].h_active, 1024);
+        assert_eq!(dtds[0].v_active, 768);
+        assert_eq!(dtds[1].h_active, 1600);
+        assert_eq!(dtds[1].v_active, 900);
+    }
+
+    #[test]
+    fn serialize_extended_auto_routes_high_refresh_cvtrb2_to_displayid() {
+        // 2560x1440@144Hz CVT-RB2 produces v_front = 89, which exceeds DTD limit (v_front <= 63)
+        let specs = vec![
+            spec(1920, 1080, 60.0, TimingKind::Hdtv),
+            spec(2560, 1440, 144.0, TimingKind::Pc),
+        ];
+        let opts = SerializeOptions::default();
+        let out = serialize_resolutions_extended(None, &specs, &opts).unwrap();
+        assert_eq!(out.written, 2);
+        assert_eq!(out.bytes.len(), 2 * EDID_BLOCK_SIZE);
+        checksum_ok(&out.bytes);
+
+        // Base block should have the 1080p timing
+        let base_block = EdidBlock::from_bytes(&out.bytes[0..128]).unwrap();
+        assert_eq!(base_block.raw[126], 1);
+        let base_dtd = base_block.read_detailed(0).unwrap();
+        assert_eq!(base_dtd.h_active, 1920);
+        assert_eq!(base_dtd.v_active, 1080);
+
+        // Second block should be DisplayID (tag 0x70)
+        assert_eq!(out.bytes[128], 0x70);
+        let did_block = EdidBlock::from_bytes(&out.bytes[128..256]).unwrap();
+        let did_blocks = did_block.display_id_data_blocks().unwrap();
+        assert_eq!(did_blocks.len(), 1);
+
+        match did_blocks[0].view().unwrap() {
+            crate::extensions::DisplayIdDataBlockView::DetailedTiming { timings } => {
+                assert_eq!(timings.len(), 1);
+                assert_eq!(timings[0].h_active, 2560);
+                assert_eq!(timings[0].v_active, 1440);
+                assert_eq!(timings[0].v_sync_offset, 89);
+            }
+            other => panic!("expected DetailedTiming block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn serialize_extended_splits_multiple_cta_blocks() {
+        // 16 standard DTDs: 4 Base + 6 in CTA #1 + 6 in CTA #2 = 3 blocks total
+        let mut timings = Vec::new();
+        for i in 0..16 {
+            let width = 640 + i * 32;
+            let timing = compute_cvt(width, 480, 60.0, TimingFormula::CVT).unwrap();
+            timings.push(timing);
+        }
+
+        let opts = SerializeOptions {
+            extension_policy: ExtensionPolicy::PreferCta,
+            ..Default::default()
+        };
+        let out = serialize_timings_extended(None, &timings, &opts).unwrap();
+        assert_eq!(out.written, 16);
+        assert_eq!(out.bytes.len(), 3 * EDID_BLOCK_SIZE);
+        checksum_ok(&out.bytes);
+
+        // Base block extension count must be 2
+        assert_eq!(out.bytes[126], 2);
+        assert_eq!(out.bytes[128], 0x02);
+        assert_eq!(out.bytes[256], 0x02);
+
+        let cta1 = EdidBlock::from_bytes(&out.bytes[128..256]).unwrap();
+        let cta2 = EdidBlock::from_bytes(&out.bytes[256..384]).unwrap();
+        assert_eq!(cta1.cta_detailed_timings().unwrap().len(), 6);
+        assert_eq!(cta2.cta_detailed_timings().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn serialize_extended_splits_multiple_displayid_blocks() {
+        // 12 DisplayID timings in PreferDisplayId mode:
+        // 4 in Base (since they are DTD-compatible) + 5 in DisplayID #1 + 3 in DisplayID #2 = 3 blocks
+        let mut timings = Vec::new();
+        for i in 0..12 {
+            let width = 640 + i * 32;
+            let timing = compute_cvt(width, 480, 60.0, TimingFormula::CVT).unwrap();
+            timings.push(timing);
+        }
+
+        let opts = SerializeOptions {
+            extension_policy: ExtensionPolicy::PreferDisplayId,
+            ..Default::default()
+        };
+        let out = serialize_timings_extended(None, &timings, &opts).unwrap();
+        assert_eq!(out.written, 12);
+        assert_eq!(out.bytes.len(), 3 * EDID_BLOCK_SIZE);
+        checksum_ok(&out.bytes);
+
+        assert_eq!(out.bytes[126], 2);
+        assert_eq!(out.bytes[128], 0x70);
+        assert_eq!(out.bytes[256], 0x70);
+    }
+
+    #[test]
+    fn serialize_extended_prefer_cta_rejects_incompatible_timings() {
+        let specs = vec![spec(2560, 1440, 144.0, TimingKind::Pc)];
+        let opts = SerializeOptions {
+            extension_policy: ExtensionPolicy::PreferCta,
+            ..Default::default()
+        };
+        let res = serialize_resolutions_extended(None, &specs, &opts);
+        assert!(matches!(
+            res,
+            Err(SerializeError::TimingDoesNotFit { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn serialize_extended_respects_max_blocks_limit() {
+        let mut timings = Vec::new();
+        for i in 0..16 {
+            let width = 640 + i * 32;
+            let timing = compute_cvt(width, 480, 60.0, TimingFormula::CVT).unwrap();
+            timings.push(timing);
+        }
+        let opts = SerializeOptions {
+            extension_policy: ExtensionPolicy::Auto,
+            max_blocks: 2, // Only allow 2 blocks (Base + 1 Extension), but 16 timings need 3 blocks
+            ..Default::default()
+        };
+        let res = serialize_timings_extended(None, &timings, &opts);
+        assert!(matches!(
+            res,
+            Err(SerializeError::TooManyExtensions { count: 2 })
         ));
     }
 }

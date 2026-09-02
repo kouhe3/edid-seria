@@ -1101,3 +1101,155 @@ fn malformed_cta_mutation_errors_are_not_reported_as_not_cta() {
     ));
     assert_eq!(block.as_bytes(), before);
 }
+
+#[test]
+fn high_level_extended_serialization_overflow_to_cta_and_displayid_e2e() {
+    use edid_seria::{
+        Edid, ExtensionPolicy, ResolutionSpec, SerializeOptions, TimingKind,
+        serialize_resolutions_extended,
+    };
+
+    // 5 standard DTDs (4 Base, 1 CTA overflow) + 1 CVT-RB2 144Hz timing (DisplayID)
+    let specs = vec![
+        ResolutionSpec {
+            width: 1920,
+            height: 1080,
+            refresh: 60.0,
+            kind: TimingKind::Hdtv,
+        },
+        ResolutionSpec {
+            width: 1280,
+            height: 720,
+            refresh: 60.0,
+            kind: TimingKind::Hdtv,
+        },
+        ResolutionSpec {
+            width: 800,
+            height: 600,
+            refresh: 60.0,
+            kind: TimingKind::Pc,
+        },
+        ResolutionSpec {
+            width: 640,
+            height: 480,
+            refresh: 60.0,
+            kind: TimingKind::Pc,
+        },
+        ResolutionSpec {
+            width: 1024,
+            height: 768,
+            refresh: 60.0,
+            kind: TimingKind::Pc,
+        },
+        ResolutionSpec {
+            width: 2560,
+            height: 1440,
+            refresh: 144.0,
+            kind: TimingKind::Pc,
+        },
+    ];
+
+    let options = SerializeOptions {
+        extension_policy: ExtensionPolicy::Auto,
+        ..Default::default()
+    };
+
+    let serialized = serialize_resolutions_extended(None, &specs, &options)
+        .expect("Extended serialization must succeed");
+
+    assert_eq!(serialized.written, 6);
+    assert_eq!(serialized.skipped, 0);
+    assert_eq!(serialized.bytes.len(), 3 * 128);
+
+    // Parse full multi-block EDID structure
+    let edid =
+        Edid::from_bytes(&serialized.bytes).expect("Serialized multi-block EDID must be valid");
+    assert_eq!(edid.extensions.len(), 2);
+    assert_eq!(edid.base.validate(), Ok(()));
+
+    // Check Extension 1: CTA-861
+    let ext1 = &edid.extensions[0];
+    assert_eq!(ext1.extension_kind().cta_revision(), Some(3));
+    let cta_dtds = ext1.cta_detailed_timings().expect("CTA DTDs must parse");
+    assert_eq!(cta_dtds.len(), 1);
+    assert_eq!(cta_dtds[0].h_active, 1024);
+    assert_eq!(cta_dtds[0].v_active, 768);
+
+    // Check Extension 2: DisplayID 2.0
+    let ext2 = &edid.extensions[1];
+    assert_eq!(ext2.extension_kind().display_id_version(), Some(0x20));
+    let did_blocks = ext2
+        .display_id_data_blocks()
+        .expect("DisplayID blocks must parse");
+    assert_eq!(did_blocks.len(), 1);
+    match did_blocks[0].view().expect("DisplayID view must parse") {
+        edid_seria::DisplayIdDataBlockView::DetailedTiming { timings } => {
+            assert_eq!(timings.len(), 1);
+            assert_eq!(timings[0].h_active, 2560);
+            assert_eq!(timings[0].v_active, 1440);
+            assert_eq!(timings[0].v_sync_offset, 89);
+        }
+        other => panic!("expected DetailedTiming block, got {:?}", other),
+    }
+}
+
+#[test]
+fn high_level_extended_serialization_preserves_existing_extensions_e2e() {
+    use edid_seria::{
+        CtaDataBlock, Edid, EdidBlock, ExtensionPolicy, ResolutionSpec, SerializeOptions,
+        TimingKind, serialize_resolutions_extended,
+    };
+
+    // Create an existing EDID with 1 CTA extension block holding an Audio block
+    let mut existing_bytes = vec![0u8; 256];
+    let base = EdidBlock::new_default();
+    existing_bytes[..128].copy_from_slice(base.as_bytes());
+    existing_bytes[126] = 1;
+    let base_sum: u8 = existing_bytes[..127]
+        .iter()
+        .fold(0u8, |acc, &b| acc.wrapping_add(b));
+    existing_bytes[127] = (0u8).wrapping_sub(base_sum);
+
+    let cta_block = EdidBlock::from_cta_data_blocks(
+        3,
+        &[CtaDataBlock {
+            tag: 1, // Audio Data Block
+            payload: vec![0x09, 0x07, 0x07],
+        }],
+    )
+    .unwrap();
+    existing_bytes[128..256].copy_from_slice(cta_block.as_bytes());
+
+    // Request an extreme timing (2560x1440@144Hz) that requires DisplayID
+    let specs = vec![ResolutionSpec {
+        width: 2560,
+        height: 1440,
+        refresh: 144.0,
+        kind: TimingKind::Pc,
+    }];
+
+    let options = SerializeOptions {
+        extension_policy: ExtensionPolicy::Auto,
+        preserve_existing_extensions: true,
+        ..Default::default()
+    };
+
+    let out = serialize_resolutions_extended(Some(&existing_bytes), &specs, &options).unwrap();
+    assert_eq!(out.written, 1);
+    assert_eq!(out.bytes.len(), 3 * 128);
+
+    let edid = Edid::from_bytes(&out.bytes).unwrap();
+    assert_eq!(edid.extensions.len(), 2);
+
+    // Existing CTA audio block must be intact
+    let cta_ext = &edid.extensions[0];
+    assert_eq!(cta_ext.extension_kind().cta_revision(), Some(3));
+    let cta_blocks = cta_ext.cta_data_blocks().unwrap();
+    assert_eq!(cta_blocks.len(), 1);
+    assert_eq!(cta_blocks[0].tag, 1);
+    assert_eq!(cta_blocks[0].payload, vec![0x09, 0x07, 0x07]);
+
+    // New DisplayID extension block must follow
+    let did_ext = &edid.extensions[1];
+    assert_eq!(did_ext.extension_kind().display_id_version(), Some(0x20));
+}
