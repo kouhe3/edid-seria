@@ -124,6 +124,37 @@ impl DetailedTiming {
         )
     }
 
+    /// Convert this detailed timing into a DisplayID detailed timing entry.
+    ///
+    /// Total blanking is computed as front porch + sync width + back porch
+    /// plus any border, and the sync polarity flags and preferred indicator
+    /// are mapped directly.
+    #[must_use]
+    pub fn to_display_id(&self, preferred: bool) -> crate::extensions::DisplayIdDetailedTiming {
+        crate::extensions::DisplayIdDetailedTiming {
+            pixel_clock_khz: self.pixel_clock_khz,
+            h_active: self.h_active,
+            h_blank: self
+                .h_front
+                .saturating_add(self.h_sync)
+                .saturating_add(self.h_back)
+                .saturating_add(self.h_border.saturating_mul(2)),
+            h_sync_offset: self.h_front,
+            h_sync_width: self.h_sync,
+            v_active: self.v_active,
+            v_blank: self
+                .v_front
+                .saturating_add(self.v_sync)
+                .saturating_add(self.v_back)
+                .saturating_add(self.v_border.saturating_mul(2)),
+            v_sync_offset: self.v_front,
+            v_sync_width: self.v_sync,
+            h_sync_positive: self.h_pol,
+            v_sync_positive: self.v_pol,
+            preferred,
+        }
+    }
+
     /// Parse an X11 / xrandr Modeline string into a DetailedTiming.
     pub fn from_modeline(s: &str) -> Result<Self, crate::error::ModelineError> {
         use crate::error::ModelineError;
@@ -1567,5 +1598,47 @@ mod tests {
 
         let modeline = extreme.to_modeline(None);
         assert!(modeline.starts_with("Modeline \"4294967295x4294967295_60.00\""));
+    }
+
+    #[test]
+    fn detailed_timing_to_display_id_conversion_and_saturation() {
+        let timing = DetailedTiming::compute_hdtv_blanking(1920, 1080, 60.0).unwrap();
+        let display_id = timing.to_display_id(true);
+
+        assert_eq!(display_id.pixel_clock_khz, 148_500);
+        assert_eq!(display_id.h_active, 1920);
+        assert_eq!(display_id.h_blank, 280);
+        assert_eq!(display_id.h_sync_offset, 88);
+        assert_eq!(display_id.h_sync_width, 44);
+        assert_eq!(display_id.v_active, 1080);
+        assert_eq!(display_id.v_blank, 45);
+        assert_eq!(display_id.v_sync_offset, 4);
+        assert_eq!(display_id.v_sync_width, 5);
+        assert!(display_id.h_sync_positive);
+        assert!(display_id.v_sync_positive);
+        assert!(display_id.preferred);
+
+        let extreme = DetailedTiming {
+            pixel_clock_khz: u32::MAX,
+            h_active: u32::MAX,
+            h_front: u32::MAX,
+            h_sync: u32::MAX,
+            h_back: u32::MAX,
+            h_border: u32::MAX,
+            v_active: u32::MAX,
+            v_front: u32::MAX,
+            v_sync: u32::MAX,
+            v_back: u32::MAX,
+            v_border: u32::MAX,
+            h_pol: false,
+            v_pol: true,
+            v_rate: 144.0,
+        };
+        let ext_did = extreme.to_display_id(false);
+        assert_eq!(ext_did.h_blank, u32::MAX);
+        assert_eq!(ext_did.v_blank, u32::MAX);
+        assert!(!ext_did.h_sync_positive);
+        assert!(ext_did.v_sync_positive);
+        assert!(!ext_did.preferred);
     }
 }

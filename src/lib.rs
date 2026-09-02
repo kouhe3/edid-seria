@@ -39,7 +39,8 @@ pub use metadata::{
     StandardTiming, StandardTimingAspectRatio, StandardTimingEntry,
 };
 pub use serialize::{
-    ResolutionSpec, SerializedEdid, TimingKind, serialize_resolutions,
-    serialize_resolutions_checked, serialize_timings,
+    ExtensionPolicy, ResolutionSpec, SerializeOptions, SerializedEdid, TimingKind,
+    serialize_resolutions, serialize_resolutions_checked, serialize_resolutions_extended,
+    serialize_timings, serialize_timings_extended,
 };
 pub use timing::{DetailedTiming, TimingFormula, all_presets, compute_cvt, dtd_fits, validate_dtd};
