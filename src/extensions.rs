@@ -289,6 +289,71 @@ impl DisplayIdProductIdentification {
     }
 }
 
+/// DisplayID Tiled Display Topology Data Block (Tag 0x28 in 2.0, Tag 0x12 in 1.x).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdTiledDisplayTopology {
+    /// Raw capability flags byte.
+    pub caps: u8,
+    /// Horizontal tile count (1..=64).
+    pub tiles_h: u8,
+    /// Vertical tile count (1..=64).
+    pub tiles_v: u8,
+    /// Horizontal tile location (0-based).
+    pub tile_location_h: u8,
+    /// Vertical tile location (0-based).
+    pub tile_location_v: u8,
+    /// Tile width in pixels (1..=65536).
+    pub tile_width: u16,
+    /// Tile height in pixels (1..=65536).
+    pub tile_height: u16,
+    /// Pixel multiplier for bevel sizes (0 = no bevel scale).
+    pub pixel_multiplier: u8,
+    /// Top bevel size, present when bevel info is available.
+    pub bevel_top: Option<u8>,
+    /// Bottom bevel size, present when bevel info is available.
+    pub bevel_bottom: Option<u8>,
+    /// Right bevel size, present when bevel info is available.
+    pub bevel_right: Option<u8>,
+    /// Left bevel size, present when bevel info is available.
+    pub bevel_left: Option<u8>,
+    /// Vendor identifier: 2.0 IEEE OUI or 1.x character ID.
+    pub vendor_id: [u8; 3],
+    /// Whether `vendor_id` is a 2.0 IEEE OUI (true) or a 1.x character ID (false).
+    pub vendor_id_is_oui: bool,
+    /// Tiled display product code.
+    pub product_code: u16,
+    /// Tiled display serial number.
+    pub serial_number: u32,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+impl DisplayIdTiledDisplayTopology {
+    /// Whether bevel information is present (capability bit 6).
+    #[must_use]
+    pub const fn has_bevel_info(&self) -> bool {
+        self.caps & 0x40 != 0
+    }
+
+    /// Whether the tiled display is a single physical enclosure (capability bit 7).
+    #[must_use]
+    pub const fn single_enclosure(&self) -> bool {
+        self.caps & 0x80 != 0
+    }
+
+    /// Behavior when this is the only visible tile (capability bits 0..2).
+    #[must_use]
+    pub const fn only_tile_behavior(&self) -> u8 {
+        self.caps & 0x07
+    }
+
+    /// Behavior when more than one tile is visible but not all (capability bits 3..4).
+    #[must_use]
+    pub const fn multi_tile_behavior(&self) -> u8 {
+        (self.caps >> 3) & 0x03
+    }
+}
+
 /// Typed read-only views for DisplayID data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisplayIdDataBlockView {
@@ -316,6 +381,11 @@ pub enum DisplayIdDataBlockView {
     DynamicVideoTimingRange {
         /// Decoded dynamic video timing range limits.
         range: DisplayIdDynamicVideoTimingRange,
+    },
+    /// DisplayID Tiled Display Topology (Tag 0x28 or Tag 0x12).
+    TiledDisplayTopology {
+        /// Decoded tiled display topology.
+        topology: DisplayIdTiledDisplayTopology,
     },
     /// Embedded CTA data-block collection.
     Cta {
@@ -763,6 +833,9 @@ impl DisplayIdDataBlock {
             0x09 | 0x25 => Ok(DisplayIdDataBlockView::DynamicVideoTimingRange {
                 range: decode_dynamic_video_timing_range(self)?,
             }),
+            0x12 | 0x28 => Ok(DisplayIdDataBlockView::TiledDisplayTopology {
+                topology: decode_tiled_display_topology(self)?,
+            }),
             0x81 => {
                 let raw = self.payload.clone();
                 let data_blocks = parse_cta_data_blocks(&self.payload, 0, false)?;
@@ -799,6 +872,7 @@ impl DisplayIdDataBlockView {
             }
             Self::InterfaceFeatures { .. } => 0x26,
             Self::DynamicVideoTimingRange { .. } => 0x25,
+            Self::TiledDisplayTopology { .. } => 0x28,
             Self::Cta { .. } => 0x81,
             Self::Unknown { tag, .. } => *tag,
         };
@@ -948,6 +1022,68 @@ impl DisplayIdDataBlockView {
                 payload[6] = features.colorspace_eotf_1;
                 payload[7] = features.colorspace_eotf_2;
                 payload[8] = features.additional_colorspace_count;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::TiledDisplayTopology { topology } if matches!(tag, 0x12 | 0x28) => {
+                if topology.tiles_h == 0
+                    || topology.tiles_v == 0
+                    || topology.tile_location_h >= topology.tiles_h
+                    || topology.tile_location_v >= topology.tiles_v
+                    || topology.tile_width == 0
+                    || topology.tile_height == 0
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "tile count, location, or size is invalid",
+                    });
+                }
+                if !topology.has_bevel_info() && topology.pixel_multiplier != 0 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "bevel multiplier set without bevel info",
+                    });
+                }
+                if topology.tiles_h > 64
+                    || topology.tiles_v > 64
+                    || topology.tile_location_h >= 64
+                    || topology.tile_location_v >= 64
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "tile count or location exceeds 6-bit field",
+                    });
+                }
+                let mut payload = topology.raw.clone();
+                if payload.len() < 22 {
+                    payload.resize(22, 0);
+                }
+                check_display_id_payload_length(payload.len())?;
+                let num_h_stored = topology.tiles_h - 1;
+                let num_v_stored = topology.tiles_v - 1;
+                payload[0] = topology.caps;
+                payload[1] = ((num_h_stored & 0x0F) << 4) | (num_v_stored & 0x0F);
+                payload[2] =
+                    ((topology.tile_location_h & 0x0F) << 4) | (topology.tile_location_v & 0x0F);
+                payload[3] = ((num_h_stored >> 4) & 0x03) << 6
+                    | ((num_v_stored >> 4) & 0x03) << 4
+                    | ((topology.tile_location_h >> 4) & 0x03) << 2
+                    | ((topology.tile_location_v >> 4) & 0x03);
+                payload[4..6].copy_from_slice(&(topology.tile_width - 1).to_le_bytes());
+                payload[6..8].copy_from_slice(&(topology.tile_height - 1).to_le_bytes());
+                payload[8] = topology.pixel_multiplier;
+                if topology.has_bevel_info() {
+                    payload[9] = topology.bevel_top.unwrap_or(0);
+                    payload[10] = topology.bevel_bottom.unwrap_or(0);
+                    payload[11] = topology.bevel_right.unwrap_or(0);
+                    payload[12] = topology.bevel_left.unwrap_or(0);
+                }
+                payload[13..16].copy_from_slice(&topology.vendor_id);
+                payload[16..18].copy_from_slice(&topology.product_code.to_le_bytes());
+                payload[18..22].copy_from_slice(&topology.serial_number.to_le_bytes());
                 Ok(DisplayIdDataBlock {
                     tag,
                     revision: 0,
@@ -1244,6 +1380,67 @@ fn decode_product_identification(
         year: 2000 + u16::from(bytes[10]),
         product_name: bytes[12..12 + name_len].to_vec(),
         raw: bytes.to_vec(),
+    })
+}
+
+fn decode_tiled_display_topology(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdTiledDisplayTopology, ExtensionError> {
+    if block.payload.len() < 22 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 22,
+            multiple: 0,
+        });
+    }
+    let b = &block.payload;
+    let caps = b[0];
+    let num_v_stored = (b[1] & 0x0F) | ((b[3] & 0x30) >> 4);
+    let num_h_stored = ((b[1] >> 4) & 0x0F) | ((b[3] & 0xC0) >> 4);
+    let tile_v_location = (b[2] & 0x0F) | ((b[3] & 0x03) << 4);
+    let tile_h_location = ((b[2] >> 4) & 0x0F) | ((b[3] & 0x0C) << 2);
+    let tile_width = u16::from_le_bytes([b[4], b[5]]) + 1;
+    let tile_height = u16::from_le_bytes([b[6], b[7]]) + 1;
+    let pixel_multiplier = b[8];
+    let has_bevel = caps & 0x40 != 0;
+    let (bevel_top, bevel_bottom, bevel_right, bevel_left) = if has_bevel {
+        (Some(b[9]), Some(b[10]), Some(b[11]), Some(b[12]))
+    } else {
+        (None, None, None, None)
+    };
+    let tiles_h = num_h_stored + 1;
+    let tiles_v = num_v_stored + 1;
+    if tile_h_location >= tiles_h || tile_v_location >= tiles_v {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "tile location exceeds tile count",
+        });
+    }
+    if !has_bevel && pixel_multiplier != 0 {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "bevel multiplier set without bevel info",
+        });
+    }
+    Ok(DisplayIdTiledDisplayTopology {
+        caps,
+        tiles_h,
+        tiles_v,
+        tile_location_h: tile_h_location,
+        tile_location_v: tile_v_location,
+        tile_width,
+        tile_height,
+        pixel_multiplier,
+        bevel_top,
+        bevel_bottom,
+        bevel_right,
+        bevel_left,
+        vendor_id: [b[13], b[14], b[15]],
+        vendor_id_is_oui: block.tag == 0x28,
+        product_code: u16::from_le_bytes([b[16], b[17]]),
+        serial_number: u32::from_le_bytes([b[18], b[19], b[20], b[21]]),
+        raw: b.to_vec(),
     })
 }
 
@@ -1781,6 +1978,20 @@ impl EdidBlock {
         Ok(products)
     }
 
+    /// Read all Tiled Display Topology blocks from DisplayID extension blocks.
+    pub fn display_id_tiled_topologies(
+        &self,
+    ) -> Result<Vec<DisplayIdTiledDisplayTopology>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut topologies = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::TiledDisplayTopology { topology } = block.view()? {
+                topologies.push(topology);
+            }
+        }
+        Ok(topologies)
+    }
+
     /// Read detailed timings from this DisplayID extension block.
     pub fn display_id_detailed_timings(
         &self,
@@ -2032,7 +2243,8 @@ mod tests {
         CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdDataBlock,
         DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
         DisplayIdDynamicVideoTimingRange, DisplayIdHeader, DisplayIdInterfaceFeatures,
-        DisplayIdProductIdentification, ExtensionError, ExtensionKind, ExtensionWriteError,
+        DisplayIdProductIdentification, DisplayIdTiledDisplayTopology, ExtensionError,
+        ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -2520,6 +2732,89 @@ mod tests {
         };
         assert!(matches!(
             invalid_vfreq.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+    }
+
+    #[test]
+    fn display_id_tiled_topology_roundtrip_geometry_and_rejection() {
+        // Tag 0x28, 22-byte payload. 2x2 grid, tile at (1,0) (0-based), 1920x1080 tile,
+        // vendor OUI, product 0x1234, serial 0xDEADBEEF.
+        let payload = vec![
+            0x00, // caps (multiple enclosures, no bevel)
+            0x11, // num_h stored low nibble 1(->2), num_v stored low nibble 1(->2)
+            0x10, // tile_h location high nibble 1, tile_v location low nibble 0
+            0x00, // high bits all zero
+            0x7F, 0x07, // width stored 1919 (0x077F) => 1920
+            0x37, 0x04, // height stored 1079 => 1080
+            0x00, // pixel multiplier
+            0, 0, 0, 0, // bevels (not present, caps&0x40=0)
+            0x03, 0x0C, 0x00, // vendor OUI
+            0x34, 0x12, // product 0x1234
+            0xEF, 0xBE, 0xAD, 0xDE, // serial 0xDEADBEEF
+        ];
+        assert_eq!(payload.len(), 22);
+        let block = DisplayIdDataBlock {
+            tag: 0x28,
+            revision: 0,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::TiledDisplayTopology { topology } = &view else {
+            panic!("expected TiledDisplayTopology view");
+        };
+        let topology: &DisplayIdTiledDisplayTopology = topology;
+        assert_eq!(topology.tiles_h, 2);
+        assert_eq!(topology.tiles_v, 2);
+        assert_eq!(topology.tile_location_h, 1);
+        assert_eq!(topology.tile_location_v, 0);
+        assert_eq!(topology.tile_width, 1920);
+        assert_eq!(topology.tile_height, 1080);
+        assert!(topology.vendor_id_is_oui);
+        assert_eq!(topology.vendor_id, [0x03, 0x0C, 0x00]);
+        assert_eq!(topology.product_code, 0x1234);
+        assert_eq!(topology.serial_number, 0xDEADBEEF);
+        assert!(!topology.has_bevel_info());
+        assert!(!topology.single_enclosure());
+
+        // Lossless round-trip.
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // Query from EdidBlock.
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let topologies = edid_block.display_id_tiled_topologies().unwrap();
+        assert_eq!(topologies.len(), 1);
+        assert_eq!(topologies[0].tile_location_h, 1);
+
+        // Rejection: tile location >= tile count.
+        let bad_location = DisplayIdDataBlock {
+            tag: 0x28,
+            revision: 0,
+            payload: {
+                let mut p2 = payload.clone();
+                p2[2] = 0x20; // tile_h location 2 (but 2 tiles)
+                p2
+            },
+        };
+        assert!(matches!(
+            bad_location.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+
+        // Rejection: bevel multiplier set without bevel info.
+        let bad_bevel = DisplayIdDataBlock {
+            tag: 0x28,
+            revision: 0,
+            payload: {
+                let mut p2 = payload.clone();
+                p2[8] = 1; // pixel multiplier set, but caps&0x40=0
+                p2
+            },
+        };
+        assert!(matches!(
+            bad_bevel.view(),
             Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
         ));
     }
