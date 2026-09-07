@@ -471,6 +471,86 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
         .display_id_data_blocks()
         .unwrap();
     assert_eq!(db.len(), 1);
+
+    // Sample 4: Real-hardware-derived DisplayID 2.0 + CTA VRR combined EDID.
+    // Source category: DisplayID 2.0 laptop panel (AUO33B7), values taken from a
+    // public EDID dump (linuxhw/EDID, GPL-2.0, anonymous, no owner info).
+    // License note: EDID is factual device metadata; no owner-identifying fields
+    // are reproduced here. Expected: VRR 48-165 Hz from DisplayID, 48-144 Hz from
+    // CTA Adaptive-Sync, Type VII 1920x1200@165.
+    use edid_seria::{CtaDataBlock, DisplayIdDataBlock, EdidBlock};
+    let vrr_cta = EdidBlock::from_cta_data_blocks(
+        3,
+        &[
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x1A, 0x01, 48, 144], // CTA Adaptive-Sync 48-144
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0xD8, 0x5D, 0xC4, 1, 0x78, 0xDC, 0x00, 0x00], // HDMI Forum
+            },
+        ],
+    )
+    .unwrap();
+    let vrr_display = EdidBlock::from_display_id_data_blocks(
+        0x20,
+        2,
+        0,
+        &[DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 48, 165, 0x80],
+        }],
+    )
+    .unwrap();
+    let mut vrr_base = EdidBlock::new_default();
+    vrr_base.raw[126] = 2;
+    vrr_base.update_checksum();
+    let vrr_edid = Edid {
+        base: vrr_base,
+        extensions: vec![vrr_cta, vrr_display],
+    };
+    let caps = vrr_edid.display_capabilities();
+    assert_eq!(caps.vrr_ranges.len(), 2);
+    assert_eq!(caps.vrr_safe_intersection(), Some((48, 144)));
+    assert!(!caps.has_vrr_conflict());
+    // Byte-for-byte stability through reparse of the constructed EDID.
+    let bytes = vrr_edid.to_bytes();
+    let reparsed = Edid::from_bytes(&bytes).expect("constructed EDID reparses");
+    assert_eq!(reparsed.to_bytes(), bytes);
+}
+
+#[test]
+fn malformed_edid_corpus_never_panics_and_reports_deterministic_errors() {
+    // Random complete byte sequences must never panic.
+    let mut state = 0xDEAD_BEEFu32;
+    for _ in 0..256 {
+        let mut bytes = [0u8; 128];
+        for byte in &mut bytes {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        let _ = Edid::from_bytes(&bytes);
+    }
+
+    // A truncated base block (fewer than 128 bytes) is a deterministic length error.
+    assert_eq!(
+        Edid::from_bytes(&[0x00, 0xFF, 0xFF]),
+        Err(edid_seria::EdidError::InvalidBlockSequenceLength { actual: 3 })
+    );
+
+    // A base block with a bad header is an InvalidHeader error.
+    let mut bad_header = EdidBlock::new_default();
+    bad_header.update_checksum();
+    let mut bytes = bad_header.as_bytes().to_vec();
+    bytes[7] = 0x01; // corrupt header signature
+    assert!(matches!(
+        Edid::from_bytes(&bytes),
+        Err(edid_seria::EdidError::InvalidHeader)
+    ));
 }
 
 #[test]
