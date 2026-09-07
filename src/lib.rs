@@ -10,6 +10,7 @@
 //! No OS dependencies; the registry and elevation glue lives in `cru-rs`.
 
 pub mod builder;
+pub mod capabilities;
 pub mod edid;
 pub mod error;
 pub mod extensions;
@@ -17,6 +18,10 @@ pub mod metadata;
 pub mod serialize;
 pub use builder::{BaseBlockBuilder, BaseBlockError, TimingPlacement};
 pub mod timing;
+pub use capabilities::{
+    AudioSource, CapabilitySource, DisplayCapabilities, DisplayTiming, InterfaceSource,
+    TimingSource, VrrRange,
+};
 pub use edid::{
     DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock, MAX_EDID_BLOCKS, MAX_EDID_BYTES,
 };

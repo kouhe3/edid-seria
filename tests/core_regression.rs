@@ -18,6 +18,92 @@ fn preset_dtds_roundtrip_through_strict_writer() {
 }
 
 #[test]
+fn display_capabilities_aggregates_cta_and_displayid_with_sources_and_vrr_conflict() {
+    use edid_seria::{CtaDataBlock, DisplayIdDataBlock, Edid, EdidBlock};
+
+    let base = EdidBlock::new_default();
+    let cta = EdidBlock::from_cta_data_blocks(
+        3,
+        &[
+            CtaDataBlock {
+                tag: 1,
+                payload: vec![(1 << 3) | 1, 0b0000_0111, 0b011],
+            },
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x1A, 0x01, 48, 144],
+            },
+        ],
+    )
+    .unwrap();
+
+    let display_id = EdidBlock::from_display_id_data_blocks(
+        0x20,
+        2,
+        0,
+        &[
+            DisplayIdDataBlock {
+                tag: 0x25,
+                revision: 0,
+                payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 48, 165, 0x80],
+            },
+            DisplayIdDataBlock {
+                tag: 0x22,
+                revision: 0,
+                payload: vec![
+                    // 20-byte Type VII detailed timing (1920x1080 @ 60)
+                    0xCC, 0x05, 0x00, 0x80, 0x7F, 0x07, 0x17, 0x01, 0x57, 0x80, 0x2B, 0x00, 0x37,
+                    0x04, 0x2C, 0x00, 0x03, 0x00, 0x04, 0x00,
+                ],
+            },
+        ],
+    )
+    .unwrap();
+
+    let edid = Edid {
+        base,
+        extensions: vec![cta, display_id],
+    };
+    let caps = edid.display_capabilities();
+    let _ = edid_seria::DisplayTiming::Detailed;
+    let _ = edid_seria::DisplayTiming::DisplayIdDetailed;
+
+    assert!(caps.audio.len() == 1);
+    assert_eq!(caps.audio[0].descriptor.format, 1);
+
+    // VRR: CTA Adaptive-Sync (48..144) and DisplayID dynamic range (48..165).
+    assert_eq!(caps.vrr_ranges.len(), 2);
+    let cta_vrr = caps
+        .vrr_ranges
+        .iter()
+        .find(|r| matches!(r.source, edid_seria::CapabilitySource::CtaExtension { .. }))
+        .unwrap();
+    assert_eq!((cta_vrr.min_hz, cta_vrr.max_hz), (48, 144));
+    let did_vrr = caps
+        .vrr_ranges
+        .iter()
+        .find(|r| {
+            matches!(
+                r.source,
+                edid_seria::CapabilitySource::DisplayIdExtension { .. }
+            )
+        })
+        .unwrap();
+    assert_eq!((did_vrr.min_hz, did_vrr.max_hz), (48, 165));
+
+    // Safe intersection is (48, 144).
+    assert_eq!(caps.vrr_safe_intersection(), Some((48, 144)));
+    assert!(!caps.has_vrr_conflict());
+
+    // Timings: DisplayID detailed + Base detailed captured.
+    assert!(
+        caps.timings
+            .iter()
+            .any(|t| matches!(t.timing, edid_seria::DisplayTiming::DisplayIdDetailed(_)))
+    );
+}
+
+#[test]
 fn arbitrary_complete_bytes_never_panic_parser() {
     let mut state = 0x9E37_79B9u32;
     for _ in 0..256 {
