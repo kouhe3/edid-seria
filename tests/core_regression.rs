@@ -522,6 +522,72 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
 }
 
 #[test]
+fn canonicalization_policy_is_deterministic_and_preserve_order_is_noop() {
+    use edid_seria::{DisplayIdDataBlock, DisplayIdOrdering, EdidBlock};
+
+    // Deliberately unsorted data blocks.
+    let blocks = vec![
+        DisplayIdDataBlock {
+            tag: 0x24,
+            revision: 0,
+            payload: vec![0x00, 0x00, 0x01, 0x00, 0x01, 0x3B],
+        },
+        DisplayIdDataBlock {
+            tag: 0x22,
+            revision: 0,
+            payload: vec![
+                0xCC, 0x05, 0x00, 0x80, 0x7F, 0x07, 0x17, 0x01, 0x57, 0x80, 0x2B, 0x00, 0x37, 0x04,
+                0x2C, 0x00, 0x03, 0x00, 0x04, 0x00,
+            ],
+        },
+        DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 48, 165, 0x80],
+        },
+    ];
+
+    let source = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &blocks).unwrap();
+    let source_bytes = source.as_bytes().to_vec();
+
+    // PreserveSourceOrder is a no-op: bytes are unchanged.
+    let mut preserved = source.clone();
+    preserved
+        .reorder_display_id_data_blocks(DisplayIdOrdering::PreserveSourceOrder)
+        .unwrap();
+    assert_eq!(preserved.as_bytes(), source_bytes);
+
+    // Canonical ordering is deterministic and idempotent.
+    let mut canonical = source.clone();
+    canonical
+        .reorder_display_id_data_blocks(DisplayIdOrdering::Canonical)
+        .unwrap();
+    let canonical_bytes = canonical.as_bytes().to_vec();
+    // Canonical sorts by tag: 0x22 < 0x24 < 0x25.
+    let ordered = canonical.display_id_data_blocks().unwrap();
+    assert_eq!(ordered[0].tag, 0x22);
+    assert_eq!(ordered[1].tag, 0x24);
+    assert_eq!(ordered[2].tag, 0x25);
+
+    // Re-applying canonical produces identical bytes (idempotent).
+    let mut canonical_twice = canonical.clone();
+    canonical_twice
+        .reorder_display_id_data_blocks(DisplayIdOrdering::Canonical)
+        .unwrap();
+    assert_eq!(canonical_twice.as_bytes(), canonical_bytes);
+
+    // A differently-ordered source canonicalizes to the same bytes.
+    let mut reversed_blocks = blocks.clone();
+    reversed_blocks.reverse();
+    let reversed = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &reversed_blocks).unwrap();
+    let mut reversed_canonical = reversed;
+    reversed_canonical
+        .reorder_display_id_data_blocks(DisplayIdOrdering::Canonical)
+        .unwrap();
+    assert_eq!(reversed_canonical.as_bytes(), canonical_bytes);
+}
+
+#[test]
 fn malformed_edid_corpus_never_panics_and_reports_deterministic_errors() {
     // Random complete byte sequences must never panic.
     let mut state = 0xDEAD_BEEFu32;

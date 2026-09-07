@@ -380,6 +380,15 @@ pub struct DisplayIdEnumeratedTiming {
     pub code: u16,
 }
 
+/// Ordering policy used when re-ordering DisplayID data blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayIdOrdering {
+    /// Keep the source order; the block bytes are left unchanged.
+    PreserveSourceOrder,
+    /// Deterministically sort data blocks by tag, revision, then payload.
+    Canonical,
+}
+
 /// Typed read-only views for DisplayID data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisplayIdDataBlockView {
@@ -642,6 +651,11 @@ pub enum ExtensionWriteError {
         /// Maximum representable value.
         maximum: u32,
     },
+    /// A DisplayID data-block layout cannot be re-read while re-ordering.
+    InvalidDisplayIdLayout {
+        /// Underlying read error.
+        source: ExtensionError,
+    },
     /// An HDR dynamic metadata entry cannot be represented.
     InvalidHdrDynamicMetadataEntry {
         /// Zero-based entry index.
@@ -805,6 +819,9 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "DisplayID product-identification field {field} value {value} exceeds maximum {maximum}"
             ),
+            Self::InvalidDisplayIdLayout { source } => {
+                write!(f, "DisplayID data-block layout is invalid: {source}")
+            }
             Self::InvalidHdrDynamicMetadataEntry { index, reason } => write!(
                 f,
                 "CTA HDR dynamic metadata entry {index} is invalid: {reason}"
@@ -2086,6 +2103,25 @@ impl EdidBlock {
             Self::from_display_id_data_blocks(self.raw[1], self.raw[3], self.raw[4], blocks)?;
         *self = rebuilt;
         Ok(())
+    }
+
+    /// Re-order DisplayID data blocks according to the ordering policy.
+    ///
+    /// `PreserveSourceOrder` is a no-op that keeps the block bytes unchanged;
+    /// `Canonical` deterministically sorts the data blocks and is idempotent.
+    pub fn reorder_display_id_data_blocks(
+        &mut self,
+        ordering: DisplayIdOrdering,
+    ) -> Result<(), ExtensionWriteError> {
+        if matches!(ordering, DisplayIdOrdering::PreserveSourceOrder) {
+            return Ok(());
+        }
+        let mut blocks = self
+            .display_id_data_blocks()
+            .map_err(|source| ExtensionWriteError::InvalidDisplayIdLayout { source })?;
+        blocks
+            .sort_by(|a, b| (a.tag, a.revision, &a.payload).cmp(&(b.tag, b.revision, &b.payload)));
+        self.replace_display_id_data_blocks(&blocks)
     }
 
     /// Construct a CTA-861 extension containing only a data-block collection.

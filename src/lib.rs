@@ -35,7 +35,7 @@ pub use extensions::{
     CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
     DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
     DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange, DisplayIdEnumeratedTiming,
-    DisplayIdFormulaTiming, DisplayIdHeader, DisplayIdInterfaceFeatures,
+    DisplayIdFormulaTiming, DisplayIdHeader, DisplayIdInterfaceFeatures, DisplayIdOrdering,
     DisplayIdProductIdentification, DisplayIdTiledDisplayTopology, ExtensionError, ExtensionKind,
     ExtensionWriteError,
 };
