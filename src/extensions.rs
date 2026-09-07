@@ -5,9 +5,9 @@ use crate::edid::EdidBlock;
 mod cta;
 
 pub use cta::{
-    CtaAdaptiveSync, CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
-    CtaExtendedDataBlockView, CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock,
-    CtaVideoCapability, CtaVideoMode, CtaY420Support,
+    CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
+    CtaDataBlockView, CtaExtendedDataBlockView, CtaHeader, CtaSpeakerAllocation,
+    CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
 };
 
 /// Recognized kind of an EDID extension block.
@@ -1988,12 +1988,12 @@ fn parse_cta_data_blocks(
 #[cfg(test)]
 mod tests {
     use super::{
-        CtaAdaptiveSync, CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
-        CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
-        CtaVideoMode, CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView,
-        DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange,
-        DisplayIdHeader, DisplayIdInterfaceFeatures, DisplayIdProductIdentification,
-        ExtensionError, ExtensionKind, ExtensionWriteError,
+        CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
+        CtaDataBlockView, CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock,
+        CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdDataBlock,
+        DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
+        DisplayIdDynamicVideoTimingRange, DisplayIdHeader, DisplayIdInterfaceFeatures,
+        DisplayIdProductIdentification, ExtensionError, ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -2214,6 +2214,132 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn cta_audio_descriptor_semantic_accessors_and_roundtrip() {
+        // LPCM: 2 channels, 48/44.1/32 kHz, 24/20/16-bit.
+        let lpcm = CtaAudioDescriptor {
+            format: 1,
+            channels: 2,
+            sample_rates: 0b000_0111,
+            format_specific: 0b111,
+        };
+        assert_eq!(lpcm.format_kind(), CtaAudioFormat::Lpcm);
+        assert!(lpcm.supports_sample_rate(48));
+        assert!(lpcm.supports_sample_rate(44));
+        assert!(lpcm.supports_sample_rate(32));
+        assert!(!lpcm.supports_sample_rate(192));
+        assert!(lpcm.lpcm_supports_sample_size(16));
+        assert!(lpcm.lpcm_supports_sample_size(20));
+        assert!(lpcm.lpcm_supports_sample_size(24));
+        assert_eq!(lpcm.lpcm_sample_size_bits(), &[16, 20, 24]);
+        assert_eq!(lpcm.channels, 2);
+
+        // Compressed format: AC-3 has no LPCM sample size.
+        let ac3 = CtaAudioDescriptor {
+            format: 2,
+            channels: 6,
+            sample_rates: 0b000_0111,
+            format_specific: 0x40,
+        };
+        assert_eq!(ac3.format_kind(), CtaAudioFormat::Ac3);
+        assert_eq!(ac3.lpcm_sample_size_bits(), &[]);
+        assert!(!ac3.lpcm_supports_sample_size(16));
+
+        // Extended format (format code 15) maps to Extended.
+        let ext = CtaAudioDescriptor {
+            format: 15,
+            channels: 8,
+            sample_rates: 0,
+            format_specific: 0xD8,
+        };
+        assert_eq!(ext.format_kind(), CtaAudioFormat::Extended);
+
+        // Unknown format code maps to Reserved.
+        let unknown = CtaAudioDescriptor {
+            format: 0,
+            channels: 2,
+            sample_rates: 0,
+            format_specific: 0,
+        };
+        assert_eq!(unknown.format_kind(), CtaAudioFormat::Reserved);
+
+        // Round-trip a mixed audio list (LPCM + compressed + unknown) preserves bytes.
+        let block = CtaDataBlock {
+            tag: 1,
+            payload: vec![
+                (1 << 3) | (2 - 1),
+                0b000_0111,
+                0b111, // LPCM
+                (2 << 3) | (6 - 1),
+                0b000_0111,
+                0x40, // AC-3
+                (7 << 3) | (5 - 1),
+                0b000_0111,
+                0x2A, // DTS
+            ],
+        };
+        let view = block.view().unwrap();
+        let CtaDataBlockView::Audio { descriptors } = &view else {
+            panic!("expected Audio view");
+        };
+        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors[0].format_kind(), CtaAudioFormat::Lpcm);
+        assert_eq!(descriptors[1].format_kind(), CtaAudioFormat::Ac3);
+        assert_eq!(descriptors[2].format_kind(), CtaAudioFormat::Dts);
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // A reserved format code is rejected by the checked writer.
+        let reserved = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 0,
+                channels: 2,
+                sample_rates: 0,
+                format_specific: 0,
+            }],
+        };
+        assert!(matches!(
+            reserved.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioFormat {
+                index: 0,
+                format: 0
+            })
+        ));
+
+        // Reject channel count outside 1..=8.
+        let bad_channels = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 1,
+                channels: 9,
+                sample_rates: 0,
+                format_specific: 0,
+            }],
+        };
+        assert!(matches!(
+            bad_channels.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioChannels {
+                index: 0,
+                channels: 9
+            })
+        ));
+
+        // Reject format code outside 1..=15.
+        let bad_format = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 16,
+                channels: 2,
+                sample_rates: 0,
+                format_specific: 0,
+            }],
+        };
+        assert!(matches!(
+            bad_format.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioFormat {
+                index: 0,
+                format: 16
+            })
+        ));
+    }
+
     #[test]
     fn cta_y420_video_and_capability_map_roundtrip_and_query() {
         let vdb = CtaDataBlock {

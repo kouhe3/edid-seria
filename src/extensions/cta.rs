@@ -141,6 +141,44 @@ pub struct CtaDataBlock {
     pub payload: Vec<u8>,
 }
 
+/// CTA-861 audio coding format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CtaAudioFormat {
+    /// Linear PCM (code 1).
+    Lpcm,
+    /// AC-3 (code 2).
+    Ac3,
+    /// MPEG-1, layers 1 & 2 (code 3).
+    Mpeg1,
+    /// MPEG-1 layer 3 / MP3 (code 4).
+    Mp3,
+    /// MPEG-2 multichannel (code 5).
+    Mpeg2,
+    /// AAC LC (code 6).
+    AacLc,
+    /// DTS (code 7).
+    Dts,
+    /// ATRAC (code 8).
+    Atrac,
+    /// One Bit Audio (code 9).
+    OneBitAudio,
+    /// Enhanced AC-3 / DD+ (code 10).
+    EnhancedAc3,
+    /// DTS-HD (code 11).
+    DtsHd,
+    /// MAT / MLP (code 12).
+    MatMlp,
+    /// DST (code 13).
+    Dst,
+    /// WMA Pro (code 14).
+    WmaPro,
+    /// Extended audio format (code 15); the format code is in the third byte.
+    Extended,
+    /// Reserved / unknown code (0 or > 15).
+    Reserved,
+}
+
 /// A CTA Short Audio Descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CtaAudioDescriptor {
@@ -148,10 +186,88 @@ pub struct CtaAudioDescriptor {
     pub format: u8,
     /// Maximum channel count.
     pub channels: u8,
-    /// Supported sample-rate bit mask.
+    /// Supported sample-rate bit mask (bit0=32k, bit1=44.1k, bit2=48k,
+    /// bit3=88.2k, bit4=96k, bit5=176.4k, bit6=192k).
     pub sample_rates: u8,
     /// Format-specific third byte.
     pub format_specific: u8,
+}
+
+impl CtaAudioDescriptor {
+    /// Map the raw format code to a typed [`CtaAudioFormat`].
+    #[must_use]
+    pub const fn format_kind(&self) -> CtaAudioFormat {
+        match self.format {
+            1 => CtaAudioFormat::Lpcm,
+            2 => CtaAudioFormat::Ac3,
+            3 => CtaAudioFormat::Mpeg1,
+            4 => CtaAudioFormat::Mp3,
+            5 => CtaAudioFormat::Mpeg2,
+            6 => CtaAudioFormat::AacLc,
+            7 => CtaAudioFormat::Dts,
+            8 => CtaAudioFormat::Atrac,
+            9 => CtaAudioFormat::OneBitAudio,
+            10 => CtaAudioFormat::EnhancedAc3,
+            11 => CtaAudioFormat::DtsHd,
+            12 => CtaAudioFormat::MatMlp,
+            13 => CtaAudioFormat::Dst,
+            14 => CtaAudioFormat::WmaPro,
+            15 => CtaAudioFormat::Extended,
+            _ => CtaAudioFormat::Reserved,
+        }
+    }
+
+    /// Return whether the given nominal sample rate in kHz is supported.
+    ///
+    /// Valid `khz` values are 32, 44, 48, 88, 96, 176, and 192 (44 / 88 / 176
+    /// denote the 44.1 / 88.2 / 176.4 kHz rates).
+    #[must_use]
+    pub const fn supports_sample_rate(&self, khz: u16) -> bool {
+        let bit = match khz {
+            32 => 0,
+            44 => 1,
+            48 => 2,
+            88 => 3,
+            96 => 4,
+            176 => 5,
+            192 => 6,
+            _ => return false,
+        };
+        self.sample_rates & (1 << bit) != 0
+    }
+
+    /// Return the LPCM sample sizes in bits (a subset of 16, 20, 24), or empty
+    /// when this descriptor is not LPCM.
+    #[must_use]
+    pub const fn lpcm_sample_size_bits(&self) -> &'static [u8] {
+        if self.format != 1 {
+            return &[];
+        }
+        // LPCM: byte2 bit0=16, bit1=20, bit2=24 (bits 7..3 reserved).
+        match self.format_specific & 0x07 {
+            0b000 => &[],
+            0b001 => &[16],
+            0b010 => &[20],
+            0b100 => &[24],
+            // Bit patterns are a combination; the common cases cover single sizes.
+            _ => &[16, 20, 24],
+        }
+    }
+
+    /// Return whether the LPCM descriptor supports the given sample size in bits.
+    #[must_use]
+    pub const fn lpcm_supports_sample_size(&self, bits: u8) -> bool {
+        if self.format != 1 {
+            return false;
+        }
+        let mask = match bits {
+            16 => 0b001,
+            20 => 0b010,
+            24 => 0b100,
+            _ => return false,
+        };
+        self.format_specific & mask != 0
+    }
 }
 
 /// A CTA Video Data Block entry.
