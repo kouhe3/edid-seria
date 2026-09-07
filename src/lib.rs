@@ -26,11 +26,12 @@ pub use error::{
 };
 pub use extensions::{
     CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
-    CtaDataBlockView, CtaExtendedDataBlockView, CtaHeader, CtaSpeakerAllocation,
-    CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdDataBlock,
-    DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
-    DisplayIdDynamicVideoTimingRange, DisplayIdHeader, DisplayIdInterfaceFeatures,
-    DisplayIdProductIdentification, ExtensionError, ExtensionKind, ExtensionWriteError,
+    CtaDataBlockView, CtaExtendedDataBlockView, CtaHdrDynamicMetadataEntry, CtaHeader,
+    CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
+    DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
+    DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange, DisplayIdHeader,
+    DisplayIdInterfaceFeatures, DisplayIdProductIdentification, ExtensionError, ExtensionKind,
+    ExtensionWriteError,
 };
 pub use metadata::{
     AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,

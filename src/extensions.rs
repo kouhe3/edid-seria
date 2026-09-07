@@ -6,8 +6,8 @@ mod cta;
 
 pub use cta::{
     CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
-    CtaDataBlockView, CtaExtendedDataBlockView, CtaHeader, CtaSpeakerAllocation,
-    CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
+    CtaDataBlockView, CtaExtendedDataBlockView, CtaHdrDynamicMetadataEntry, CtaHeader,
+    CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
 };
 
 /// Recognized kind of an EDID extension block.
@@ -532,6 +532,13 @@ pub enum ExtensionWriteError {
         /// Maximum representable value.
         maximum: u32,
     },
+    /// An HDR dynamic metadata entry cannot be represented.
+    InvalidHdrDynamicMetadataEntry {
+        /// Zero-based entry index.
+        index: usize,
+        /// Reason the entry is not representable.
+        reason: &'static str,
+    },
     /// The CTA extension has a malformed data-block collection or DTD layout.
     InvalidCtaLayout {
         /// Underlying structured CTA parsing error.
@@ -687,6 +694,10 @@ impl std::fmt::Display for ExtensionWriteError {
             } => write!(
                 f,
                 "DisplayID product-identification field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidHdrDynamicMetadataEntry { index, reason } => write!(
+                f,
+                "CTA HDR dynamic metadata entry {index} is invalid: {reason}"
             ),
             Self::InvalidCtaLayout { source } => {
                 write!(f, "CTA extension layout is invalid: {source}")
@@ -1372,6 +1383,22 @@ pub enum ExtensionError {
         /// Maximum representable value.
         maximum: u32,
     },
+    /// A CTA HDR dynamic metadata entry has an invalid length (type_len < 2).
+    InvalidDynamicHdrMetadataLength {
+        /// Zero-based entry index.
+        index: usize,
+        /// Declared entry length byte.
+        length: usize,
+    },
+    /// A CTA HDR dynamic metadata entry is truncated relative to the block payload.
+    TruncatedDynamicHdrMetadataEntry {
+        /// Zero-based entry index.
+        index: usize,
+        /// Available bytes.
+        length: usize,
+        /// Minimum required bytes.
+        minimum: usize,
+    },
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -1427,6 +1454,18 @@ impl std::fmt::Display for ExtensionError {
             } => write!(
                 f,
                 "DisplayID product-identification field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidDynamicHdrMetadataLength { index, length } => write!(
+                f,
+                "CTA HDR dynamic metadata entry {index} has invalid length {length}"
+            ),
+            Self::TruncatedDynamicHdrMetadataEntry {
+                index,
+                length,
+                minimum,
+            } => write!(
+                f,
+                "CTA HDR dynamic metadata entry {index} needs {minimum} bytes but only {length} available"
             ),
             Self::TruncatedDataBlock { offset, length } => write!(
                 f,
@@ -2482,6 +2521,70 @@ mod tests {
         assert!(matches!(
             invalid_vfreq.view(),
             Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+    }
+
+    #[test]
+    fn cta_dynamic_hdr_metadata_roundtrip_and_rejection() {
+        // Build an HDR Dynamic Metadata block: a versioned type 1, an SL-HDR type 2,
+        // and an unknown type. Each entry is [type_len][type_lo][type_hi][data...].
+        let payload = vec![
+            0x07, // entry 1: type 1, type_len 3 => [3, 1,0, 0x13]
+            3, 0x01, 0x00, 0x13, // entry 2: type 2, type_len 4 => [4, 2,0, 0x52, 0x00]
+            4, 0x02, 0x00, 0x52, 0x00,
+            // entry 3: unknown type 0xCDAB, type_len 4 => [4, 0xAB,0xCD, 0xDE,0xAD]
+            4, 0xAB, 0xCD, 0xDE, 0xAD,
+        ];
+        let block = CtaDataBlock {
+            tag: 7,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrDynamicMetadata {
+            entries,
+            raw,
+        }) = &view
+        else {
+            panic!("expected HdrDynamicMetadata view");
+        };
+        assert_eq!(raw, &payload);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].metadata_type, 1);
+        assert_eq!(entries[0].version(), Some(3));
+        assert!(!entries[0].sl_hdr1());
+        assert_eq!(entries[1].metadata_type, 2);
+        assert_eq!(entries[1].version(), Some(2));
+        assert!(entries[1].sl_hdr1());
+        assert!(!entries[1].sl_hdr2());
+        assert!(entries[1].sl_hdr3());
+        assert_eq!(entries[2].metadata_type, 0xCDAB);
+        assert_eq!(entries[2].version(), None);
+        assert_eq!(entries[2].data, vec![0xDE, 0xAD]);
+
+        // Lossless round-trip.
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // Rejection: truncated entry (declared length exceeds payload).
+        let truncated = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x07, 10, 0x01, 0x00, 0x11],
+        };
+        assert!(matches!(
+            truncated.view(),
+            Err(ExtensionError::TruncatedDynamicHdrMetadataEntry { index: 0, .. })
+        ));
+
+        // Rejection: type_len < 2.
+        let bad_len = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x07, 1, 0x01, 0x00],
+        };
+        assert!(matches!(
+            bad_len.view(),
+            Err(ExtensionError::InvalidDynamicHdrMetadataLength {
+                index: 0,
+                length: 1
+            })
         ));
     }
 

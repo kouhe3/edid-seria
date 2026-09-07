@@ -270,6 +270,59 @@ impl CtaAudioDescriptor {
     }
 }
 
+/// A CTA-861 HDR Dynamic Metadata entry.
+///
+/// Each entry is `[type_len][type_lo][type_hi][data...]`. The complete
+/// type-specific bytes are kept verbatim in `data` so unknown fields survive a
+/// typed round-trip; `version` and the SL-HDR flags are read-only views over it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtaHdrDynamicMetadataEntry {
+    /// HDR dynamic metadata type (e.g. 1 = ST 2094-10, 2 = SL-HDR, 4 = ST 2094-40).
+    pub metadata_type: u16,
+    /// Complete type-specific payload bytes (bytes after the 2-byte type).
+    pub data: Vec<u8>,
+    /// Original complete entry bytes (type_len byte + 2-byte type + data).
+    pub raw: Vec<u8>,
+}
+
+impl CtaHdrDynamicMetadataEntry {
+    /// Return the version for types 1, 2, and 4 (low nibble of the first data byte),
+    /// or `None` for other types or empty payload.
+    #[must_use]
+    pub fn version(&self) -> Option<u8> {
+        if matches!(self.metadata_type, 1 | 2 | 4) && !self.data.is_empty() {
+            Some(self.data[0] & 0x0F)
+        } else {
+            None
+        }
+    }
+
+    /// Whether SL-HDR1 (ETSI TS 103 433-1) is supported (type 2, version >= 1).
+    #[must_use]
+    pub fn sl_hdr1(&self) -> bool {
+        self.sl_flag(0x10)
+    }
+
+    /// Whether SL-HDR2 (ETSI TS 103 433-2) is supported (type 2, version >= 1).
+    #[must_use]
+    pub fn sl_hdr2(&self) -> bool {
+        self.sl_flag(0x20)
+    }
+
+    /// Whether SL-HDR3 (ETSI TS 103 433-3) is supported (type 2, version >= 1).
+    #[must_use]
+    pub fn sl_hdr3(&self) -> bool {
+        self.sl_flag(0x40)
+    }
+
+    fn sl_flag(&self, mask: u8) -> bool {
+        self.metadata_type == 2
+            && self.version().is_some_and(|v| v >= 1)
+            && !self.data.is_empty()
+            && (self.data[0] & mask != 0)
+    }
+}
+
 /// A CTA Video Data Block entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CtaVideoMode {
@@ -426,6 +479,13 @@ pub enum CtaExtendedDataBlockView {
         max_frame_average_luminance: Option<u8>,
         /// Optional minimum luminance byte.
         min_luminance: Option<u8>,
+        /// Original extended-tag-prefixed payload.
+        raw: Vec<u8>,
+    },
+    /// CTA-861 HDR Dynamic Metadata Data Block, extended tag 0x07.
+    HdrDynamicMetadata {
+        /// Dynamic HDR metadata entries in source order.
+        entries: Vec<CtaHdrDynamicMetadataEntry>,
         /// Original extended-tag-prefixed payload.
         raw: Vec<u8>,
     },
@@ -1107,6 +1167,31 @@ impl CtaDataBlockView {
                 }
                 Ok(CtaDataBlock { tag: 7, payload })
             }
+            Self::Extended(CtaExtendedDataBlockView::HdrDynamicMetadata { entries, .. }) => {
+                let mut payload = vec![0x07];
+                for (index, entry) in entries.iter().enumerate() {
+                    let data_len = entry.data.len();
+                    let type_len = 2 + data_len;
+                    if type_len < 2 {
+                        return Err(ExtensionWriteError::InvalidHdrDynamicMetadataEntry {
+                            index,
+                            reason: "entry length below minimum",
+                        });
+                    }
+                    if (1 + type_len).checked_add(payload.len()).is_none()
+                        || payload.len() + 1 + type_len > 0x1F
+                    {
+                        return Err(ExtensionWriteError::InvalidHdrDynamicMetadataEntry {
+                            index,
+                            reason: "entry overflows block payload",
+                        });
+                    }
+                    payload.push(type_len as u8);
+                    payload.extend_from_slice(&entry.metadata_type.to_le_bytes());
+                    payload.extend_from_slice(&entry.data);
+                }
+                Ok(CtaDataBlock { tag: 7, payload })
+            }
         })
         .and_then(validate_typed_cta_data_block)
     }
@@ -1273,6 +1358,59 @@ impl CtaDataBlock {
                         max_luminance: self.payload.get(3).copied(),
                         max_frame_average_luminance: self.payload.get(4).copied(),
                         min_luminance: self.payload.get(5).copied(),
+                        raw: self.payload.clone(),
+                    },
+                ))
+            }
+            0x07 => {
+                let body = &self.payload[1..];
+                let mut entries = Vec::new();
+                let mut offset = 0;
+                let mut index = 0;
+                if body.is_empty() {
+                    return Err(ExtensionError::TruncatedExtendedDataBlock {
+                        extended_tag,
+                        length: self.payload.len(),
+                        minimum: 2,
+                    });
+                }
+                while offset < body.len() {
+                    if body.len() - offset < 3 {
+                        return Err(ExtensionError::TruncatedDynamicHdrMetadataEntry {
+                            index,
+                            length: body.len() - offset,
+                            minimum: 3,
+                        });
+                    }
+                    let type_len = body[offset] as usize;
+                    if type_len < 2 {
+                        return Err(ExtensionError::InvalidDynamicHdrMetadataLength {
+                            index,
+                            length: type_len,
+                        });
+                    }
+                    let entry_end = offset + 1 + type_len;
+                    if entry_end > body.len() {
+                        return Err(ExtensionError::TruncatedDynamicHdrMetadataEntry {
+                            index,
+                            length: type_len,
+                            minimum: body.len() - offset,
+                        });
+                    }
+                    let metadata_type = u16::from_le_bytes([body[offset + 1], body[offset + 2]]);
+                    let data = body[offset + 3..entry_end].to_vec();
+                    let raw = body[offset..entry_end].to_vec();
+                    entries.push(CtaHdrDynamicMetadataEntry {
+                        metadata_type,
+                        data,
+                        raw,
+                    });
+                    offset = entry_end;
+                    index += 1;
+                }
+                Ok(CtaDataBlockView::Extended(
+                    CtaExtendedDataBlockView::HdrDynamicMetadata {
+                        entries,
                         raw: self.payload.clone(),
                     },
                 ))
