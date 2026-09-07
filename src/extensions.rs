@@ -244,13 +244,58 @@ impl DisplayIdInterfaceFeatures {
     }
 }
 
+/// DisplayID Product Identification Data Block (Tag 0x20 in 2.0, Tag 0x00 in 1.x).
+///
+/// 2.0 uses an IEEE OUI for the vendor; 1.x uses a three-character vendor ID.
+/// The 3-byte `vendor_id` is stored verbatim and `vendor_id_is_oui` distinguishes
+/// the two layouts so a typed round-trip never mixes the field rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdProductIdentification {
+    /// Vendor identifier: 2.0 IEEE OUI bytes or 1.x three-character vendor ID.
+    pub vendor_id: [u8; 3],
+    /// Whether `vendor_id` is a 2.0 IEEE OUI (true) or a 1.x character ID (false).
+    pub vendor_id_is_oui: bool,
+    /// Product code (2 bytes, LSB/MSB).
+    pub product_code: u16,
+    /// Serial number (4 bytes, little-endian), 0 if unspecified.
+    pub serial_number: u32,
+    /// Week of manufacture, 0 = unspecified, 255 = model-year tag.
+    pub week_of_manufacture: u8,
+    /// Year of manufacture / model year (2000 + stored value).
+    pub year: u16,
+    /// Product name raw bytes (exact, possibly non-UTF-8), up to 236 bytes.
+    pub product_name: Vec<u8>,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+impl DisplayIdProductIdentification {
+    /// Return the product name as a UTF-8 slice, or `None` if it is not valid UTF-8.
+    #[must_use]
+    pub fn product_name_str(&self) -> Option<&str> {
+        std::str::from_utf8(&self.product_name).ok()
+    }
+
+    /// Return a lossy UTF-8 view of the product name, replacing invalid sequences.
+    #[must_use]
+    pub fn product_name_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.product_name)
+    }
+
+    /// Whether byte 12 uses the model-year tag (`0xFF`) instead of a manufacture week.
+    #[must_use]
+    pub const fn is_model_year(&self) -> bool {
+        self.week_of_manufacture == 0xFF
+    }
+}
+
 /// Typed read-only views for DisplayID data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisplayIdDataBlockView {
     /// DisplayID 1.x or 2.x Product Identification Data Block.
     ProductIdentification {
-        /// Original product-identification payload.
-        raw: Vec<u8>,
+        /// Decoded product identification fields.
+        product: DisplayIdProductIdentification,
     },
     /// DisplayID 1.x or 2.x Display Parameters Data Block.
     DisplayParameters {
@@ -478,6 +523,15 @@ pub enum ExtensionWriteError {
         /// Maximum representable value.
         maximum: u8,
     },
+    /// A DisplayID product-identification field is out of its representable range.
+    InvalidDisplayIdProductField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u32,
+        /// Maximum representable value.
+        maximum: u32,
+    },
     /// The CTA extension has a malformed data-block collection or DTD layout.
     InvalidCtaLayout {
         /// Underlying structured CTA parsing error.
@@ -626,6 +680,14 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "DisplayID interface feature field {field} value {value} exceeds maximum {maximum}"
             ),
+            Self::InvalidDisplayIdProductField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID product-identification field {field} value {value} exceeds maximum {maximum}"
+            ),
             Self::InvalidCtaLayout { source } => {
                 write!(f, "CTA extension layout is invalid: {source}")
             }
@@ -673,7 +735,7 @@ impl DisplayIdDataBlock {
     pub fn view(&self) -> Result<DisplayIdDataBlockView, ExtensionError> {
         match self.tag {
             0x00 | 0x20 => Ok(DisplayIdDataBlockView::ProductIdentification {
-                raw: self.payload.clone(),
+                product: decode_product_identification(self)?,
             }),
             0x01 | 0x21 => Ok(DisplayIdDataBlockView::DisplayParameters {
                 parameters: decode_display_parameters(self)?,
@@ -738,12 +800,34 @@ impl DisplayIdDataBlockView {
         tag: u8,
     ) -> Result<DisplayIdDataBlock, ExtensionWriteError> {
         match self {
-            Self::ProductIdentification { raw } if matches!(tag, 0x00 | 0x20) => {
-                check_display_id_payload_length(raw.len())?;
+            Self::ProductIdentification { product } if matches!(tag, 0x00 | 0x20) => {
+                if !(2000..=2255).contains(&product.year) {
+                    return Err(ExtensionWriteError::InvalidDisplayIdProductField {
+                        field: "year",
+                        value: product.year as u32,
+                        maximum: 2255,
+                    });
+                }
+                if product.product_name.len() > u8::MAX as usize {
+                    return Err(ExtensionWriteError::InvalidDisplayIdProductField {
+                        field: "product_name",
+                        value: product.product_name.len() as u32,
+                        maximum: u8::MAX as u32,
+                    });
+                }
+                let mut payload = Vec::with_capacity(12 + product.product_name.len());
+                payload.extend_from_slice(&product.vendor_id);
+                payload.extend_from_slice(&product.product_code.to_le_bytes());
+                payload.extend_from_slice(&product.serial_number.to_le_bytes());
+                payload.push(product.week_of_manufacture);
+                payload.push((product.year - 2000) as u8);
+                payload.push(product.product_name.len() as u8);
+                payload.extend_from_slice(&product.product_name);
+                check_display_id_payload_length(payload.len())?;
                 Ok(DisplayIdDataBlock {
                     tag,
                     revision: 0,
-                    payload: raw.clone(),
+                    payload,
                 })
             }
             Self::DisplayParameters { parameters } if matches!(tag, 0x01 | 0x21) => {
@@ -1119,6 +1203,39 @@ fn decode_interface_features(
     })
 }
 
+fn decode_product_identification(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdProductIdentification, ExtensionError> {
+    if block.payload.len() < 12 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 12,
+            multiple: 0,
+        });
+    }
+    let bytes = &block.payload;
+    let name_len = bytes[11] as usize;
+    if 12 + name_len > bytes.len() {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: bytes.len(),
+            minimum: 12 + name_len,
+            multiple: 0,
+        });
+    }
+    Ok(DisplayIdProductIdentification {
+        vendor_id: [bytes[0], bytes[1], bytes[2]],
+        vendor_id_is_oui: block.tag == 0x20,
+        product_code: u16::from_le_bytes([bytes[3], bytes[4]]),
+        serial_number: u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+        week_of_manufacture: bytes[9],
+        year: 2000 + u16::from(bytes[10]),
+        product_name: bytes[12..12 + name_len].to_vec(),
+        raw: bytes.to_vec(),
+    })
+}
+
 /// Errors returned while reading an extension's structured view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1246,6 +1363,15 @@ pub enum ExtensionError {
         /// Maximum representable value.
         maximum: u8,
     },
+    /// A DisplayID product-identification field is out of its representable range.
+    InvalidDisplayIdProductField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u32,
+        /// Maximum representable value.
+        maximum: u32,
+    },
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -1293,6 +1419,14 @@ impl std::fmt::Display for ExtensionError {
             } => write!(
                 f,
                 "DisplayID interface feature field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidDisplayIdProductField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID product-identification field {field} value {value} exceeds maximum {maximum}"
             ),
             Self::TruncatedDataBlock { offset, length } => write!(
                 f,
@@ -1594,6 +1728,20 @@ impl EdidBlock {
         Ok(features)
     }
 
+    /// Read all Product Identification blocks from DisplayID extension blocks.
+    pub fn display_id_product_identifications(
+        &self,
+    ) -> Result<Vec<DisplayIdProductIdentification>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut products = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::ProductIdentification { product } = block.view()? {
+                products.push(product);
+            }
+        }
+        Ok(products)
+    }
+
     /// Read detailed timings from this DisplayID extension block.
     pub fn display_id_detailed_timings(
         &self,
@@ -1844,8 +1992,8 @@ mod tests {
         CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
         CtaVideoMode, CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView,
         DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange,
-        DisplayIdHeader, DisplayIdInterfaceFeatures, ExtensionError, ExtensionKind,
-        ExtensionWriteError,
+        DisplayIdHeader, DisplayIdInterfaceFeatures, DisplayIdProductIdentification,
+        ExtensionError, ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -2208,6 +2356,117 @@ mod tests {
         assert!(matches!(
             invalid_vfreq.view(),
             Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+    }
+
+    #[test]
+    fn display_id_product_identification_roundtrip_fields_and_rejection() {
+        // 2.x layout (tag 0x20): IEEE OUI vendor.
+        let payload_2x = vec![
+            0x03, 0x0C, 0x00, // OUI (little-endian 0x000C03)
+            0xAA, 0xBB, // product code 0xBBAA
+            0x78, 0x56, 0x34, 0x12, // serial 0x12345678
+            42,   // week
+            24,   // year stored = 2024 - 2000
+            5,    // name len
+            b'O', b'U', b'I', b'4', b'2',
+        ];
+        let block_2x = DisplayIdDataBlock {
+            tag: 0x20,
+            revision: 0,
+            payload: payload_2x.clone(),
+        };
+        let view_2x = block_2x.view().unwrap();
+        let DisplayIdDataBlockView::ProductIdentification { product } = &view_2x else {
+            panic!("expected ProductIdentification view");
+        };
+        assert!(product.vendor_id_is_oui);
+        assert_eq!(product.vendor_id, [0x03, 0x0C, 0x00]);
+        assert_eq!(product.product_code, 0xBBAA);
+        assert_eq!(product.serial_number, 0x12345678);
+        assert_eq!(product.week_of_manufacture, 42);
+        assert_eq!(product.year, 2024);
+        assert_eq!(product.product_name, b"OUI42");
+        assert!(!product.is_model_year());
+        // Lossless round-trip
+        assert_eq!(view_2x.to_data_block_with_tag(0x20).unwrap(), block_2x);
+
+        // 1.x layout (tag 0x00): character vendor ID, no serial, empty name.
+        let payload_1x = vec![
+            b'A', b'U', b'P', // vendor chars
+            0x05, 0x00, // product code 5
+            0, 0, 0, 0,  // no serial
+            0,  // no week
+            20, // year stored = 2020
+            0,  // empty name
+        ];
+        let block_1x = DisplayIdDataBlock {
+            tag: 0x00,
+            revision: 0,
+            payload: payload_1x.clone(),
+        };
+        let view_1x = block_1x.view().unwrap();
+        let DisplayIdDataBlockView::ProductIdentification { product } = &view_1x else {
+            panic!("expected ProductIdentification view");
+        };
+        assert!(!product.vendor_id_is_oui);
+        assert_eq!(product.vendor_id, [b'A', b'U', b'P']);
+        assert_eq!(product.product_code, 5);
+        assert_eq!(product.serial_number, 0);
+        assert_eq!(product.year, 2020);
+        assert!(product.product_name.is_empty());
+        assert_eq!(view_1x.to_data_block_with_tag(0x00).unwrap(), block_1x);
+
+        // Non-UTF-8 product name is preserved exactly.
+        let non_utf8 = DisplayIdDataBlockView::ProductIdentification {
+            product: DisplayIdProductIdentification {
+                vendor_id: [0x01, 0x02, 0x03],
+                vendor_id_is_oui: true,
+                product_code: 7,
+                serial_number: 0,
+                week_of_manufacture: 0xFF,
+                year: 2020,
+                product_name: vec![0xFF, 0xFE, 0x00, 0x41],
+                raw: vec![],
+            },
+        };
+        let encoded = non_utf8.to_data_block().unwrap();
+        let decoded = encoded.view().unwrap();
+        let DisplayIdDataBlockView::ProductIdentification { product } = decoded else {
+            panic!("expected ProductIdentification view");
+        };
+        assert_eq!(product.product_name, vec![0xFF, 0xFE, 0x00, 0x41]);
+        assert!(product.product_name_str().is_none());
+        assert!(product.is_model_year());
+
+        // Query from EdidBlock.
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block_2x))
+                .unwrap();
+        let products = edid_block.display_id_product_identifications().unwrap();
+        assert_eq!(products.len(), 1);
+        assert_eq!(products[0].product_code, 0xBBAA);
+
+        // Rejection: year outside 2000..=2255.
+        let invalid_year = DisplayIdDataBlockView::ProductIdentification {
+            product: DisplayIdProductIdentification {
+                vendor_id: [0; 3],
+                vendor_id_is_oui: false,
+                product_code: 0,
+                serial_number: 0,
+                week_of_manufacture: 0,
+                year: 1999,
+                product_name: vec![],
+                raw: vec![],
+            },
+        };
+        assert!(matches!(
+            invalid_year.to_data_block_with_tag(0x00),
+            Err(ExtensionWriteError::InvalidDisplayIdProductField {
+                field: "year",
+                value: 1999,
+                maximum: 2255
+            })
         ));
     }
 

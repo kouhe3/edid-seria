@@ -215,11 +215,20 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
     block.raw[0] = 0x70;
     block.raw[1] = 0x20;
     block.raw[4] = 0;
-    block.raw[2] = 10;
+    block.raw[2] = 20;
     block.raw[3] = 2;
-    block.raw[5..10].copy_from_slice(&[0x20, 1, 2, 0xAA, 0xBB]);
-    block.raw[10..15].copy_from_slice(&[0x81, 1, 2, 0x41, 16]);
-    block.raw[15] = block.raw[1..15]
+    // ProductIdentification (tag 0x20): 12-byte payload.
+    block.raw[5..20].copy_from_slice(&[
+        0x20, 0, 12, // tag, revision 0, length 12
+        0x03, 0x0C, 0x00, // IEEE OUI
+        0xAA, 0xBB, // product code 0xBBAA
+        0, 0, 0, 0,  // no serial
+        0,  // no week
+        24, // year stored = 2024
+        0,  // empty name
+    ]);
+    block.raw[20..25].copy_from_slice(&[0x81, 1, 2, 0x41, 16]);
+    block.raw[25] = block.raw[1..25]
         .iter()
         .fold(0u8, |sum, &byte| sum.wrapping_sub(byte));
     block.update_checksum();
@@ -228,7 +237,7 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
         block.display_id_header().unwrap(),
         DisplayIdHeader {
             revision: 0x20,
-            payload_length: 10,
+            payload_length: 20,
             product_type_or_primary_use: 2,
             extension_count: 0,
         }
@@ -236,8 +245,10 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
     let data_blocks = block.display_id_data_blocks().unwrap();
     assert!(matches!(
         data_blocks[0].view().unwrap(),
-        DisplayIdDataBlockView::ProductIdentification { raw }
-            if raw == vec![0xAA, 0xBB]
+        DisplayIdDataBlockView::ProductIdentification { product }
+            if product.product_code == 0xBBAA
+                && product.vendor_id_is_oui
+                && product.year == 2024
     ));
     assert!(matches!(
         data_blocks[1].view().unwrap(),
@@ -254,7 +265,7 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
         DisplayIdDataBlockView::Cta { data_blocks, .. }
             if matches!(data_blocks[0].view(), Ok(CtaDataBlockView::Video { .. }))
     ));
-    block.raw[15] ^= 1;
+    block.raw[25] ^= 1;
     assert!(matches!(
         block.display_id_header(),
         Err(ExtensionError::InvalidDisplayIdChecksum { .. })
@@ -858,9 +869,23 @@ fn displayid_typed_timing_encoder_rejects_empty_payload() {
 
 #[test]
 fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
-    use edid_seria::{DisplayIdDataBlockView, DisplayIdDisplayParameters, ExtensionWriteError};
+    use edid_seria::{
+        DisplayIdDataBlockView, DisplayIdDisplayParameters, DisplayIdProductIdentification,
+        ExtensionWriteError,
+    };
 
-    let product = DisplayIdDataBlockView::ProductIdentification { raw: vec![0; 256] };
+    let product = DisplayIdDataBlockView::ProductIdentification {
+        product: DisplayIdProductIdentification {
+            vendor_id: [0; 3],
+            vendor_id_is_oui: false,
+            product_code: 0,
+            serial_number: 0,
+            week_of_manufacture: 0,
+            year: 2024,
+            product_name: vec![0; 244],
+            raw: vec![],
+        },
+    };
     assert!(matches!(
         product.to_data_block_with_tag(0x00),
         Err(ExtensionWriteError::DisplayIdPayloadTooLong {
@@ -910,9 +935,20 @@ fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
 
 #[test]
 fn displayid_typed_raw_payloads_reject_lengths_above_extension_limit() {
-    use edid_seria::{DisplayIdDataBlockView, ExtensionWriteError};
+    use edid_seria::{DisplayIdDataBlockView, DisplayIdProductIdentification, ExtensionWriteError};
 
-    let product = DisplayIdDataBlockView::ProductIdentification { raw: vec![0; 122] };
+    let product = DisplayIdDataBlockView::ProductIdentification {
+        product: DisplayIdProductIdentification {
+            vendor_id: [0; 3],
+            vendor_id_is_oui: false,
+            product_code: 0,
+            serial_number: 0,
+            week_of_manufacture: 0,
+            year: 2024,
+            product_name: vec![0; 110],
+            raw: vec![],
+        },
+    };
     assert!(matches!(
         product.to_data_block_with_tag(0x00),
         Err(ExtensionWriteError::DisplayIdPayloadTooLong {
