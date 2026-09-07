@@ -164,6 +164,86 @@ pub struct DisplayIdDynamicVideoTimingRange {
     pub raw: Vec<u8>,
 }
 
+/// DisplayID Display Interface Features Data Block (Tag 0x26 in 2.0, Tag 0x0F in 1.x).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdInterfaceFeatures {
+    /// Color-depth support for RGB encoding (byte 0): bit0=6bpc, bit1=8bpc,
+    /// bit2=10bpc, bit3=12bpc, bit4=14bpc, bit5=16bpc.
+    pub color_depth_rgb: u8,
+    /// Color-depth support for YCbCr 4:4:4 encoding (byte 1).
+    pub color_depth_ycbcr444: u8,
+    /// Color-depth support for YCbCr 4:2:2 encoding (byte 2).
+    pub color_depth_ycbcr422: u8,
+    /// Color-depth support for YCbCr 4:2:0 encoding (byte 3).
+    pub color_depth_ycbcr420: u8,
+    /// Minimum pixel rate for YCbCr 4:2:0 in 74.25 MP/s units, 0 = supported at all modes (byte 4).
+    pub min_ycbcr420_pixel_rate: u8,
+    /// Audio capability and feature support flags (byte 5).
+    pub audio_flags: u8,
+    /// Color space and EOTF combination 1 flags (byte 6).
+    pub colorspace_eotf_1: u8,
+    /// Color space and EOTF combination 2 flags, reserved (byte 7).
+    pub colorspace_eotf_2: u8,
+    /// Number of additional color space and EOTF bytes (byte 8).
+    pub additional_colorspace_count: u8,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+impl DisplayIdInterfaceFeatures {
+    /// Return whether the given RGB bit depth (6, 8, 10, 12, 14, or 16 bpc) is supported.
+    #[must_use]
+    pub const fn supports_rgb_bpc(&self, bpc: u8) -> bool {
+        Self::supports_rgb_bpc_flags(self.color_depth_rgb, bpc)
+    }
+
+    /// Return whether the given YCbCr 4:4:4 bit depth is supported.
+    #[must_use]
+    pub const fn supports_ycbcr444_bpc(&self, bpc: u8) -> bool {
+        Self::supports_ycbcr_bpc_flags(self.color_depth_ycbcr444, bpc)
+    }
+
+    /// Return whether the given YCbCr 4:2:2 bit depth is supported.
+    #[must_use]
+    pub const fn supports_ycbcr422_bpc(&self, bpc: u8) -> bool {
+        Self::supports_ycbcr_bpc_flags(self.color_depth_ycbcr422, bpc)
+    }
+
+    /// Return whether the given YCbCr 4:2:0 bit depth is supported.
+    #[must_use]
+    pub const fn supports_ycbcr420_bpc(&self, bpc: u8) -> bool {
+        Self::supports_ycbcr_bpc_flags(self.color_depth_ycbcr420, bpc)
+    }
+
+    /// RGB encoding bit-depth bit positions: bit0=6bpc, bit1=8bpc, ..., bit5=16bpc.
+    const fn supports_rgb_bpc_flags(flags: u8, bpc: u8) -> bool {
+        matches!(bpc, 6 | 8 | 10 | 12 | 14 | 16) && (flags & (1 << ((bpc / 2) - 3))) != 0
+    }
+
+    /// YCbCr (4:4:4 / 4:2:2 / 4:2:0) bit-depth bit positions: bit0=8bpc, bit1=10bpc, ..., bit4=16bpc.
+    const fn supports_ycbcr_bpc_flags(flags: u8, bpc: u8) -> bool {
+        matches!(bpc, 8 | 10 | 12 | 14 | 16) && (flags & (1 << ((bpc / 2) - 4))) != 0
+    }
+
+    /// Return whether BT.2020 color space with SMPTE ST 2084 (PQ) EOTF is supported.
+    #[must_use]
+    pub const fn supports_bt2020_st2084(&self) -> bool {
+        self.colorspace_eotf_1 & (1 << 6) != 0
+    }
+
+    /// Return whether BT.2020 color space with the BT.2020 EOTF is supported.
+    #[must_use]
+    pub const fn supports_bt2020(&self) -> bool {
+        self.colorspace_eotf_1 & (1 << 5) != 0
+    }
+
+    /// Return whether BT.709 color space with BT.1886 EOTF is supported.
+    #[must_use]
+    pub const fn supports_bt709(&self) -> bool {
+        self.colorspace_eotf_1 & (1 << 2) != 0
+    }
+}
+
 /// Typed read-only views for DisplayID data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisplayIdDataBlockView {
@@ -181,6 +261,11 @@ pub enum DisplayIdDataBlockView {
     DetailedTiming {
         /// Timing entries in source order.
         timings: Vec<DisplayIdDetailedTiming>,
+    },
+    /// DisplayID Display Interface Features (Tag 0x26 or Tag 0x0F).
+    InterfaceFeatures {
+        /// Decoded interface features.
+        features: DisplayIdInterfaceFeatures,
     },
     /// DisplayID Dynamic Video Timing Range Limits (Tag 0x25 or Tag 0x09).
     DynamicVideoTimingRange {
@@ -384,6 +469,15 @@ pub enum ExtensionWriteError {
         /// Detail description of the invalid range constraint.
         reason: &'static str,
     },
+    /// A DisplayID interface feature field is out of its representable range.
+    InvalidDisplayIdFeatureField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u8,
+        /// Maximum representable value.
+        maximum: u8,
+    },
     /// The CTA extension has a malformed data-block collection or DTD layout.
     InvalidCtaLayout {
         /// Underlying structured CTA parsing error.
@@ -524,6 +618,14 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "DisplayID dynamic range data block 0x{tag:02X} has invalid range: {reason}"
             ),
+            Self::InvalidDisplayIdFeatureField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID interface feature field {field} value {value} exceeds maximum {maximum}"
+            ),
             Self::InvalidCtaLayout { source } => {
                 write!(f, "CTA extension layout is invalid: {source}")
             }
@@ -582,6 +684,9 @@ impl DisplayIdDataBlock {
             0x22 => Ok(DisplayIdDataBlockView::DetailedTiming {
                 timings: decode_detailed_timings(self, false)?,
             }),
+            0x0F | 0x26 => Ok(DisplayIdDataBlockView::InterfaceFeatures {
+                features: decode_interface_features(self)?,
+            }),
             0x09 | 0x25 => Ok(DisplayIdDataBlockView::DynamicVideoTimingRange {
                 range: decode_dynamic_video_timing_range(self)?,
             }),
@@ -619,6 +724,7 @@ impl DisplayIdDataBlockView {
                     0x22
                 }
             }
+            Self::InterfaceFeatures { .. } => 0x26,
             Self::DynamicVideoTimingRange { .. } => 0x25,
             Self::Cta { .. } => 0x81,
             Self::Unknown { tag, .. } => *tag,
@@ -722,6 +828,35 @@ impl DisplayIdDataBlockView {
                     tag,
                     revision: 0,
                     payload: payload.clone(),
+                })
+            }
+            Self::InterfaceFeatures { features } if matches!(tag, 0x0F | 0x26) => {
+                if features.additional_colorspace_count > 7 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                        field: "additional_colorspace_count",
+                        value: features.additional_colorspace_count,
+                        maximum: 7,
+                    });
+                }
+                let mut payload = if features.raw.len() >= 9 {
+                    features.raw.clone()
+                } else {
+                    vec![0u8; 9]
+                };
+                check_display_id_payload_length(payload.len())?;
+                payload[0] = features.color_depth_rgb;
+                payload[1] = features.color_depth_ycbcr444;
+                payload[2] = features.color_depth_ycbcr422;
+                payload[3] = features.color_depth_ycbcr420;
+                payload[4] = features.min_ycbcr420_pixel_rate;
+                payload[5] = features.audio_flags;
+                payload[6] = features.colorspace_eotf_1;
+                payload[7] = features.colorspace_eotf_2;
+                payload[8] = features.additional_colorspace_count;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
                 })
             }
             Self::DynamicVideoTimingRange { range } if matches!(tag, 0x09 | 0x25) => {
@@ -951,6 +1086,39 @@ fn decode_dynamic_video_timing_range(
     })
 }
 
+fn decode_interface_features(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdInterfaceFeatures, ExtensionError> {
+    if block.payload.len() < 9 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 9,
+            multiple: 0,
+        });
+    }
+    let bytes = &block.payload;
+    if bytes[8] > 7 {
+        return Err(ExtensionError::InvalidDisplayIdFeatureField {
+            field: "additional_colorspace_count",
+            value: bytes[8],
+            maximum: 7,
+        });
+    }
+    Ok(DisplayIdInterfaceFeatures {
+        color_depth_rgb: bytes[0],
+        color_depth_ycbcr444: bytes[1],
+        color_depth_ycbcr422: bytes[2],
+        color_depth_ycbcr420: bytes[3],
+        min_ycbcr420_pixel_rate: bytes[4],
+        audio_flags: bytes[5],
+        colorspace_eotf_1: bytes[6],
+        colorspace_eotf_2: bytes[7],
+        additional_colorspace_count: bytes[8],
+        raw: bytes.to_vec(),
+    })
+}
+
 /// Errors returned while reading an extension's structured view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1069,6 +1237,15 @@ pub enum ExtensionError {
         /// Detail description of the invalid range constraint.
         reason: &'static str,
     },
+    /// A DisplayID interface feature field is out of its representable range.
+    InvalidDisplayIdFeatureField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u8,
+        /// Maximum representable value.
+        maximum: u8,
+    },
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -1108,6 +1285,14 @@ impl std::fmt::Display for ExtensionError {
             Self::InvalidDisplayIdDynamicRange { tag, reason } => write!(
                 f,
                 "DisplayID dynamic range data block 0x{tag:02X} has invalid range: {reason}"
+            ),
+            Self::InvalidDisplayIdFeatureField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID interface feature field {field} value {value} exceeds maximum {maximum}"
             ),
             Self::TruncatedDataBlock { offset, length } => write!(
                 f,
@@ -1395,6 +1580,20 @@ impl EdidBlock {
         Ok(ranges)
     }
 
+    /// Read all Display Interface Features from DisplayID extension blocks.
+    pub fn display_id_interface_features(
+        &self,
+    ) -> Result<Vec<DisplayIdInterfaceFeatures>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut features = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::InterfaceFeatures { features: f } = block.view()? {
+                features.push(f);
+            }
+        }
+        Ok(features)
+    }
+
     /// Read detailed timings from this DisplayID extension block.
     pub fn display_id_detailed_timings(
         &self,
@@ -1645,7 +1844,8 @@ mod tests {
         CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
         CtaVideoMode, CtaY420Support, DisplayIdDataBlock, DisplayIdDataBlockView,
         DisplayIdDetailedTiming, DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange,
-        DisplayIdHeader, ExtensionError, ExtensionKind, ExtensionWriteError,
+        DisplayIdHeader, DisplayIdInterfaceFeatures, ExtensionError, ExtensionKind,
+        ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -2008,6 +2208,85 @@ mod tests {
         assert!(matches!(
             invalid_vfreq.view(),
             Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+    }
+
+    #[test]
+    fn display_id_interface_features_roundtrip_query_and_rejection() {
+        // Tag 0x26 payload (9 bytes):
+        // rgb: 8bpc + 10bpc (0b0011 -> bits 1,2)
+        // ycbcr444: 8bpc (0b0001 -> bit 0)
+        // ycbcr422: 10bpc (0b0010 -> bit 1)
+        // ycbcr420: 12bpc (0b0100 -> bit 2)
+        // min_ycbcr420_pixel_rate: 4 (74.25*4 = 297 MP/s)
+        // audio_flags: 0xE0 (32/44.1/48 kHz)
+        // colorspace_eotf_1: BT.2020 + ST2084 (bit 6) | BT.709 (bit 2) = 0x44
+        // colorspace_eotf_2: reserved 0
+        // additional_colorspace_count: 2
+        let payload = vec![
+            0b0000_0110,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0100,
+            4,
+            0xE0,
+            0x44,
+            0,
+            2,
+        ];
+        let block = DisplayIdDataBlock {
+            tag: 0x26,
+            revision: 0,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::InterfaceFeatures { features } = &view else {
+            panic!("expected InterfaceFeatures view");
+        };
+        assert!(features.supports_rgb_bpc(8));
+        assert!(features.supports_rgb_bpc(10));
+        assert!(!features.supports_rgb_bpc(12));
+        assert!(features.supports_ycbcr444_bpc(8));
+        assert!(features.supports_ycbcr422_bpc(10));
+        assert!(features.supports_ycbcr420_bpc(12));
+        assert!(features.supports_bt2020_st2084());
+        assert!(features.supports_bt709());
+        assert_eq!(features.min_ycbcr420_pixel_rate, 4);
+        assert_eq!(features.additional_colorspace_count, 2);
+        assert_eq!(features.raw, payload);
+
+        // Lossless round-trip
+        let encoded = view.to_data_block().unwrap();
+        assert_eq!(encoded, block);
+
+        // Query from EdidBlock
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let features_list = edid_block.display_id_interface_features().unwrap();
+        assert_eq!(features_list.len(), 1);
+        assert!(features_list[0].supports_bt2020_st2084());
+
+        // Mutation
+        let mut features: DisplayIdInterfaceFeatures = features.clone();
+        features.color_depth_rgb = 0b0111_1111; // all BPC
+        let modified_view = DisplayIdDataBlockView::InterfaceFeatures { features };
+        let modified_block = modified_view.to_data_block().unwrap();
+        assert_eq!(modified_block.payload[0], 0b0111_1111);
+
+        // Rejection: additional_colorspace_count > 7
+        let invalid = DisplayIdDataBlock {
+            tag: 0x26,
+            revision: 0,
+            payload: vec![0, 0, 0, 0, 0, 0, 0, 0, 8],
+        };
+        assert!(matches!(
+            invalid.view(),
+            Err(ExtensionError::InvalidDisplayIdFeatureField {
+                field: "additional_colorspace_count",
+                value: 8,
+                maximum: 7
+            })
         ));
     }
 

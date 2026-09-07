@@ -677,7 +677,7 @@ fn dtd_and_metadata_property_roundtrips() {
 fn displayid_typed_encoder_roundtrips_view_and_bytes() {
     use edid_seria::{
         DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDynamicVideoTimingRange,
-        EdidBlock,
+        DisplayIdInterfaceFeatures, EdidBlock,
     };
     let timing = DisplayIdDetailedTiming {
         pixel_clock_khz: 14_850,
@@ -757,6 +757,37 @@ fn displayid_typed_encoder_roundtrips_view_and_bytes() {
             .len(),
         0
     );
+
+    // Test DisplayIdInterfaceFeatures round-trip through encoder and EdidBlock
+    let interface_features = DisplayIdInterfaceFeatures {
+        color_depth_rgb: 0b0000_0110,
+        color_depth_ycbcr444: 0b0000_0001,
+        color_depth_ycbcr422: 0b0000_0010,
+        color_depth_ycbcr420: 0b0000_0100,
+        min_ycbcr420_pixel_rate: 2,
+        audio_flags: 0xC0,
+        colorspace_eotf_1: 0x44,
+        colorspace_eotf_2: 0,
+        additional_colorspace_count: 1,
+        raw: vec![],
+    };
+    let features_view = DisplayIdDataBlockView::InterfaceFeatures {
+        features: interface_features.clone(),
+    };
+    let features_data_block = features_view.to_data_block().unwrap();
+    assert_eq!(features_data_block.tag, 0x26);
+
+    let features_edid_block = EdidBlock::from_display_id_data_blocks(
+        0x20,
+        2,
+        0,
+        std::slice::from_ref(&features_data_block),
+    )
+    .unwrap();
+    let parsed_features = features_edid_block.display_id_interface_features().unwrap();
+    assert_eq!(parsed_features.len(), 1);
+    assert!(parsed_features[0].supports_bt2020_st2084());
+    assert!(parsed_features[0].supports_bt709());
 }
 #[test]
 fn displayid_type_vii_encoder_roundtrips_maximum_pixel_clock() {
