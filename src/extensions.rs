@@ -354,6 +354,32 @@ impl DisplayIdTiledDisplayTopology {
     }
 }
 
+/// DisplayID Type IX formula-based timing descriptor (part of tag 0x24).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayIdFormulaTiming {
+    /// Horizontal active pixels (1..=65536).
+    pub h_active: u16,
+    /// Vertical active lines (1..=65536).
+    pub v_active: u16,
+    /// Vertical refresh rate in Hz (1..=256).
+    pub v_refresh_hz: u16,
+    /// Timing formula: 0 = CVT, 1 = CVT-RB, 2 = CVT-R2.
+    pub formula: u8,
+    /// Whether the NTSC refresh rate × (1000/1001) variant is supported.
+    pub ntsc_refresh: bool,
+    /// Stereoscopic 3D mode (bits 6..5): 0 = mono, 1 = 3D, 2 = user action.
+    pub stereo_3d: u8,
+}
+
+/// A DisplayID Type VIII enumerated timing code (part of tag 0x23).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayIdEnumeratedTiming {
+    /// Timing code type: 0 = DMT, 1 = CTA VIC, 2 = HDMI VIC.
+    pub code_type: u8,
+    /// Timing code value.
+    pub code: u16,
+}
+
 /// Typed read-only views for DisplayID data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisplayIdDataBlockView {
@@ -381,6 +407,20 @@ pub enum DisplayIdDataBlockView {
     DynamicVideoTimingRange {
         /// Decoded dynamic video timing range limits.
         range: DisplayIdDynamicVideoTimingRange,
+    },
+    /// DisplayID Type IX formula-based timings (Tag 0x24).
+    FormulaTiming {
+        /// Formula-based timing descriptors in source order.
+        timings: Vec<DisplayIdFormulaTiming>,
+    },
+    /// DisplayID Type VIII enumerated timing codes (Tag 0x23).
+    EnumeratedTiming {
+        /// Timing code type (DMT / CTA VIC / HDMI VIC) shared by all codes.
+        code_type: u8,
+        /// Timing code size in bytes (1 or 2).
+        code_size: u8,
+        /// Timing code values in source order.
+        codes: Vec<u16>,
     },
     /// DisplayID Tiled Display Topology (Tag 0x28 or Tag 0x12).
     TiledDisplayTopology {
@@ -833,6 +873,14 @@ impl DisplayIdDataBlock {
             0x09 | 0x25 => Ok(DisplayIdDataBlockView::DynamicVideoTimingRange {
                 range: decode_dynamic_video_timing_range(self)?,
             }),
+            0x23 => Ok(DisplayIdDataBlockView::EnumeratedTiming {
+                code_type: (self.revision & 0xC0) >> 6,
+                code_size: if self.revision & 0x08 != 0 { 2 } else { 1 },
+                codes: decode_enumerated_timing_codes(self)?,
+            }),
+            0x24 => Ok(DisplayIdDataBlockView::FormulaTiming {
+                timings: decode_formula_timings(self)?,
+            }),
             0x12 | 0x28 => Ok(DisplayIdDataBlockView::TiledDisplayTopology {
                 topology: decode_tiled_display_topology(self)?,
             }),
@@ -871,6 +919,8 @@ impl DisplayIdDataBlockView {
                 }
             }
             Self::InterfaceFeatures { .. } => 0x26,
+            Self::FormulaTiming { .. } => 0x24,
+            Self::EnumeratedTiming { .. } => 0x23,
             Self::DynamicVideoTimingRange { .. } => 0x25,
             Self::TiledDisplayTopology { .. } => 0x28,
             Self::Cta { .. } => 0x81,
@@ -1084,6 +1134,93 @@ impl DisplayIdDataBlockView {
                 payload[13..16].copy_from_slice(&topology.vendor_id);
                 payload[16..18].copy_from_slice(&topology.product_code.to_le_bytes());
                 payload[18..22].copy_from_slice(&topology.serial_number.to_le_bytes());
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::EnumeratedTiming {
+                code_type,
+                code_size,
+                codes,
+            } if tag == 0x23 => {
+                if *code_type > 2 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                        field: "code_type",
+                        value: *code_type,
+                        maximum: 2,
+                    });
+                }
+                if *code_size != 1 && *code_size != 2 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                        field: "code_size",
+                        value: *code_size,
+                        maximum: 2,
+                    });
+                }
+                let mut payload = Vec::with_capacity(codes.len() * (*code_size as usize));
+                for &code in codes {
+                    if code_size == &2 {
+                        payload.extend_from_slice(&code.to_le_bytes());
+                    } else {
+                        if code > u8::MAX as u16 {
+                            return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                                field: "code",
+                                value: code as u8,
+                                maximum: u8::MAX,
+                            });
+                        }
+                        payload.push(code as u8);
+                    }
+                }
+                check_display_id_payload_length(payload.len())?;
+                let revision = (*code_type << 6) | if *code_size == 2 { 0x08 } else { 0 };
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision,
+                    payload,
+                })
+            }
+            Self::FormulaTiming { timings } if tag == 0x24 => {
+                if timings.is_empty() {
+                    return Err(ExtensionWriteError::DisplayIdPayloadTooShort {
+                        tag,
+                        length: 0,
+                        minimum: 6,
+                    });
+                }
+                let mut payload = Vec::with_capacity(timings.len() * 6);
+                for (index, timing) in timings.iter().enumerate() {
+                    if timing.h_active == 0
+                        || timing.v_active == 0
+                        || timing.v_refresh_hz == 0
+                        || timing.v_refresh_hz > 256
+                    {
+                        return Err(ExtensionWriteError::InvalidDisplayIdTimingField {
+                            tag,
+                            index,
+                            field: "formula_timing",
+                            value: timing.h_active as u32,
+                            maximum: 65_536,
+                        });
+                    }
+                    if timing.stereo_3d > 3 {
+                        return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                            field: "stereo_3d",
+                            value: timing.stereo_3d,
+                            maximum: 3,
+                        });
+                    }
+                    let options = (timing.stereo_3d << 5)
+                        | (u8::from(timing.ntsc_refresh) << 4)
+                        | (timing.formula & 0x07);
+                    payload.push(options);
+                    payload.extend_from_slice(&(timing.h_active - 1).to_le_bytes());
+                    payload.extend_from_slice(&(timing.v_active - 1).to_le_bytes());
+                    payload.push((timing.v_refresh_hz - 1) as u8);
+                }
+                check_display_id_payload_length(payload.len())?;
                 Ok(DisplayIdDataBlock {
                     tag,
                     revision: 0,
@@ -1442,6 +1579,63 @@ fn decode_tiled_display_topology(
         serial_number: u32::from_le_bytes([b[18], b[19], b[20], b[21]]),
         raw: b.to_vec(),
     })
+}
+
+fn decode_formula_timings(
+    block: &DisplayIdDataBlock,
+) -> Result<Vec<DisplayIdFormulaTiming>, ExtensionError> {
+    if block.payload.len() < 6 || !block.payload.len().is_multiple_of(6) {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 6,
+            multiple: 6,
+        });
+    }
+    let mut timings = Vec::with_capacity(block.payload.len() / 6);
+    for bytes in block.payload.as_chunks::<6>().0 {
+        let options = bytes[0];
+        timings.push(DisplayIdFormulaTiming {
+            h_active: u16::from_le_bytes([bytes[1], bytes[2]]) + 1,
+            v_active: u16::from_le_bytes([bytes[3], bytes[4]]) + 1,
+            v_refresh_hz: u16::from(bytes[5]) + 1,
+            formula: options & 0x07,
+            ntsc_refresh: options & 0x10 != 0,
+            stereo_3d: (options >> 5) & 0x03,
+        });
+    }
+    Ok(timings)
+}
+
+fn decode_enumerated_timing_codes(block: &DisplayIdDataBlock) -> Result<Vec<u16>, ExtensionError> {
+    let two_byte = block.revision & 0x08 != 0;
+    let bytes = &block.payload;
+    if bytes.is_empty() {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: 0,
+            minimum: 1,
+            multiple: 0,
+        });
+    }
+    if two_byte {
+        if !bytes.len().is_multiple_of(2) {
+            return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+                tag: block.tag,
+                length: bytes.len(),
+                minimum: 2,
+                multiple: 2,
+            });
+        }
+        Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect())
+    } else {
+        Ok(bytes.iter().map(|&b| u16::from(b)).collect())
+    }
 }
 
 /// Errors returned while reading an extension's structured view.
@@ -1992,6 +2186,41 @@ impl EdidBlock {
         Ok(topologies)
     }
 
+    /// Read all Type IX formula-based timings from DisplayID extension blocks.
+    pub fn display_id_formula_timings(
+        &self,
+    ) -> Result<Vec<DisplayIdFormulaTiming>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut timings = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::FormulaTiming { timings: t } = block.view()? {
+                timings.extend(t);
+            }
+        }
+        Ok(timings)
+    }
+
+    /// Read all Type VIII enumerated timing codes from DisplayID extension blocks.
+    pub fn display_id_enumerated_timings(
+        &self,
+    ) -> Result<Vec<DisplayIdEnumeratedTiming>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut timings = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::EnumeratedTiming {
+                code_type, codes, ..
+            } = block.view()?
+            {
+                timings.extend(
+                    codes
+                        .into_iter()
+                        .map(|code| DisplayIdEnumeratedTiming { code_type, code }),
+                );
+            }
+        }
+        Ok(timings)
+    }
+
     /// Read detailed timings from this DisplayID extension block.
     pub fn display_id_detailed_timings(
         &self,
@@ -2242,9 +2471,9 @@ mod tests {
         CtaDataBlockView, CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock,
         CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdDataBlock,
         DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
-        DisplayIdDynamicVideoTimingRange, DisplayIdHeader, DisplayIdInterfaceFeatures,
-        DisplayIdProductIdentification, DisplayIdTiledDisplayTopology, ExtensionError,
-        ExtensionKind, ExtensionWriteError,
+        DisplayIdDynamicVideoTimingRange, DisplayIdFormulaTiming, DisplayIdHeader,
+        DisplayIdInterfaceFeatures, DisplayIdProductIdentification, DisplayIdTiledDisplayTopology,
+        ExtensionError, ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -2816,6 +3045,96 @@ mod tests {
         assert!(matches!(
             bad_bevel.view(),
             Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+    }
+
+    #[test]
+    fn display_id_formula_and_enumerated_timing_roundtrip() {
+        // Type IX formula timing (tag 0x24): 2 descriptors.
+        let formula_payload = vec![
+            0x02 | 0x10,
+            0x7F,
+            0x07,
+            0x37,
+            0x04,
+            59, // CVT-RB, NTSC, 1920x1080 @60
+            0x01 << 5,
+            0xFF,
+            0x0F,
+            0x82,
+            0x08,
+            119, // CVT, 3D stereo, 3840x2160 @120
+        ];
+        let block = DisplayIdDataBlock {
+            tag: 0x24,
+            revision: 0,
+            payload: formula_payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::FormulaTiming { timings } = &view else {
+            panic!("expected FormulaTiming view");
+        };
+        assert_eq!(timings.len(), 2);
+        assert_eq!(timings[0].h_active, 1920);
+        assert_eq!(timings[0].v_active, 1080);
+        assert_eq!(timings[0].v_refresh_hz, 60);
+        assert_eq!(timings[0].formula, 2);
+        assert!(timings[0].ntsc_refresh);
+        assert_eq!(timings[0].stereo_3d, 0);
+        assert_eq!(timings[1].stereo_3d, 1);
+        assert_eq!(timings[1].v_refresh_hz, 120);
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // Type VIII enumerated timing (tag 0x23): 1-byte codes, CTA VIC (type 1).
+        let enum_payload = vec![16, 97, 107];
+        let enum_block = DisplayIdDataBlock {
+            tag: 0x23,
+            revision: 1 << 6,
+            payload: enum_payload.clone(),
+        };
+        let enum_view = enum_block.view().unwrap();
+        let DisplayIdDataBlockView::EnumeratedTiming {
+            code_type,
+            code_size,
+            codes,
+        } = &enum_view
+        else {
+            panic!("expected EnumeratedTiming view");
+        };
+        assert_eq!(*code_type, 1);
+        assert_eq!(*code_size, 1);
+        assert_eq!(*codes, vec![16, 97, 107]);
+        assert_eq!(enum_view.to_data_block().unwrap(), enum_block);
+
+        // Query from EdidBlock.
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let formulas = edid_block.display_id_formula_timings().unwrap();
+        assert_eq!(formulas.len(), 2);
+        assert_eq!(formulas[0].h_active, 1920);
+        let enum_edid =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&enum_block))
+                .unwrap();
+        let enum_timings = enum_edid.display_id_enumerated_timings().unwrap();
+        assert_eq!(enum_timings.len(), 3);
+        assert_eq!(enum_timings[0].code_type, 1);
+        assert_eq!(enum_timings[0].code, 16);
+
+        // Rejection: formula timing with zero active region.
+        let bad_formula = DisplayIdDataBlockView::FormulaTiming {
+            timings: vec![DisplayIdFormulaTiming {
+                h_active: 0,
+                v_active: 1080,
+                v_refresh_hz: 60,
+                formula: 0,
+                ntsc_refresh: false,
+                stereo_3d: 0,
+            }],
+        };
+        assert!(matches!(
+            bad_formula.to_data_block_with_tag(0x24),
+            Err(ExtensionWriteError::InvalidDisplayIdTimingField { .. })
         ));
     }
 

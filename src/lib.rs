@@ -29,9 +29,10 @@ pub use extensions::{
     CtaDataBlockView, CtaExtendedDataBlockView, CtaHdrDynamicMetadataEntry, CtaHeader,
     CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
     DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
-    DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange, DisplayIdHeader,
-    DisplayIdInterfaceFeatures, DisplayIdProductIdentification, DisplayIdTiledDisplayTopology,
-    ExtensionError, ExtensionKind, ExtensionWriteError,
+    DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange, DisplayIdEnumeratedTiming,
+    DisplayIdFormulaTiming, DisplayIdHeader, DisplayIdInterfaceFeatures,
+    DisplayIdProductIdentification, DisplayIdTiledDisplayTopology, ExtensionError, ExtensionKind,
+    ExtensionWriteError,
 };
 pub use metadata::{
     AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,
