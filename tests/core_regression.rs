@@ -1,4 +1,4 @@
-use edid_seria::{Edid, EdidBlock, all_presets, dtd_fits};
+use edid_seria::{EDID_BLOCK_SIZE, Edid, EdidBlock, all_presets, dtd_fits};
 
 #[test]
 fn preset_dtds_roundtrip_through_strict_writer() {
@@ -106,15 +106,93 @@ fn display_capabilities_aggregates_cta_and_displayid_with_sources_and_vrr_confli
 #[test]
 fn arbitrary_complete_bytes_never_panic_parser() {
     let mut state = 0x9E37_79B9u32;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+
+    // 1. Fully random 128-byte slices. The base-header check at bytes 0..8
+    //    rejects nearly every input before any extension logic runs, so this
+    //    only exercises the shallow rejection path.
     for _ in 0..256 {
         let mut bytes = [0u8; 128];
         for byte in &mut bytes {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            *byte = state as u8;
+            *byte = next() as u8;
         }
         let _ = Edid::from_bytes(&bytes);
+    }
+
+    // 2. Structurally valid multi-block EDIDs: force a real EDID header, a
+    //    non-zero extension tag, and correct per-block checksums. This carries
+    //    the parser past the base-header gate into the extension parse loop,
+    //    CTA/DisplayID data-block inspection, and typed view/encoder paths —
+    //    none of which the pure-random loop, or a libFuzzer mutation, reaches.
+    for _ in 0..1024 {
+        let ext_count = (next() % 4) as u8;
+        let total = (ext_count as usize + 1) * EDID_BLOCK_SIZE;
+        let mut bytes = vec![0u8; total];
+        for byte in &mut bytes {
+            *byte = next() as u8;
+        }
+        bytes[..8].copy_from_slice(&[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+        bytes[126] = ext_count;
+        // Force the first extension to alternate between a CTA-861 and a
+        // DisplayID block so both typed dispatch paths are exercised; leave
+        // the payload bytes random so the block parser still sees garbage.
+        if ext_count >= 1 {
+            if ext_count.is_multiple_of(2) {
+                bytes[128] = 0x02; // CTA-861 tag
+            } else {
+                bytes[128] = 0x70; // DisplayID tag
+            }
+        }
+        // A conformant base block needs a valid EDID version/revision
+        // (bytes 18/19 = 1.4); random bytes there are rejected by
+        // validate_base before any extension parsing, which would make this
+        // loop cover only the version-check path again.
+        bytes[18] = 0x01;
+        bytes[19] = 0x04;
+        // Repair each block's checksum (base + every extension), after the
+        // header/version/tag fixes so the blocks still validate.
+        for block_index in 0..total / EDID_BLOCK_SIZE {
+            let start = block_index * EDID_BLOCK_SIZE;
+            let end = start + EDID_BLOCK_SIZE;
+            let sum: u8 = bytes[start..end - 1]
+                .iter()
+                .fold(0u8, |a, &b| a.wrapping_add(b));
+            bytes[end - 1] = (0u8).wrapping_sub(sum);
+        }
+
+        // The parse must never panic, and any EDID that parses must round-trip
+        // through the checked serializer byte-for-byte.
+        if let Ok(edid) = Edid::from_bytes(&bytes) {
+            let _ = edid.all_detailed_timings();
+            let _ = edid.all_detailed_timings_flagged();
+            let _ = edid.monitor_name();
+            let _ = edid.serial_number();
+            let _ = edid.preferred_timing();
+            let stable = edid
+                .to_bytes_checked()
+                .expect("strictly parsed EDID must pass checked serialization");
+            assert_eq!(stable, bytes);
+        }
+        if let Some(block) = EdidBlock::from_bytes(&bytes) {
+            let _ = block.validate();
+            let _ = block.cta_header();
+            let _ = block.cta_detailed_timings();
+            let _ = block.cta_detailed_timings_flagged();
+            let _ = block.display_id_header();
+            let _ = block.display_id_data_blocks();
+            if let Ok(data_blocks) = block.cta_data_blocks() {
+                for data_block in data_blocks {
+                    if let Ok(view) = data_block.view() {
+                        let _ = view.to_data_block();
+                    }
+                }
+            }
+        }
     }
 }
 
