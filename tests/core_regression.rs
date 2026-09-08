@@ -1087,6 +1087,64 @@ fn displayid_type_vii_encoder_roundtrips_maximum_pixel_clock() {
 }
 
 #[test]
+fn displayid_ycbcr420_roundtrips_through_encode_and_decode() {
+    use edid_seria::{
+        DisplayIdAspectRatio, DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdStereo3d,
+    };
+
+    // A revision>=2 block sets byte 3 bit 7 to YCbCr 4:2:0, not "preferred".
+    let timing = DisplayIdDetailedTiming {
+        pixel_clock_khz: 14_850,
+        h_active: 1_920,
+        h_blank: 280,
+        h_sync_offset: 4,
+        h_sync_width: 44,
+        v_active: 1_080,
+        v_blank: 45,
+        v_sync_offset: 4,
+        v_sync_width: 5,
+        h_sync_positive: true,
+        v_sync_positive: false,
+        aspect_ratio: DisplayIdAspectRatio::OneToOne,
+        interlaced: false,
+        stereo_3d: DisplayIdStereo3d::Mono,
+        preferred: false,
+        ycbcr420: true,
+    };
+    let view = DisplayIdDataBlockView::DetailedTiming {
+        timings: vec![timing],
+    };
+    let block = view.to_data_block_with_tag(0x22).unwrap();
+    // The encoder must carry a revision-2 block so bit 7 re-decodes as YCbCr 4:2:0.
+    assert_eq!(block.revision, 2);
+    assert_ne!(block.payload[3] & 0x80, 0);
+
+    let decoded = block.view().unwrap();
+    let DisplayIdDataBlockView::DetailedTiming { timings } = &decoded else {
+        panic!("expected detailed timing view");
+    };
+    assert!(timings[0].ycbcr420);
+    assert!(!timings[0].preferred);
+
+    // A revision<2 (preferred) timing still emits a revision-0 block.
+    let mut timing_preferred = timing;
+    timing_preferred.ycbcr420 = false;
+    timing_preferred.preferred = true;
+    let block_preferred = DisplayIdDataBlockView::DetailedTiming {
+        timings: vec![timing_preferred],
+    }
+    .to_data_block_with_tag(0x22)
+    .unwrap();
+    assert_eq!(block_preferred.revision, 0);
+    let decoded_preferred = block_preferred.view().unwrap();
+    let DisplayIdDataBlockView::DetailedTiming { timings } = &decoded_preferred else {
+        panic!("expected detailed timing view");
+    };
+    assert!(timings[0].preferred);
+    assert!(!timings[0].ycbcr420);
+}
+
+#[test]
 fn displayid_typed_timing_encoder_rejects_empty_payload() {
     use edid_seria::{DisplayIdDataBlockView, ExtensionWriteError};
 

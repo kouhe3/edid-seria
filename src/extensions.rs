@@ -1169,15 +1169,24 @@ impl DisplayIdDataBlockView {
                     },
                 )?;
                 check_display_id_payload_length(length)?;
+                let block_revision = if timings.iter().any(|t| t.ycbcr420) {
+                    2
+                } else {
+                    0
+                };
                 let mut payload = Vec::with_capacity(length);
                 for (index, timing) in timings.iter().enumerate() {
                     payload.extend_from_slice(&encode_display_id_timing(
-                        timing, index, type_one, tag,
+                        timing,
+                        index,
+                        type_one,
+                        tag,
+                        block_revision,
                     )?);
                 }
                 Ok(DisplayIdDataBlock {
                     tag,
-                    revision: 0,
+                    revision: block_revision,
                     payload,
                 })
             }
@@ -1500,6 +1509,7 @@ fn encode_display_id_timing(
     index: usize,
     type_one: bool,
     tag: u8,
+    block_revision: u8,
 ) -> Result<[u8; 20], ExtensionWriteError> {
     let encode_field = |field: &'static str, value: u32, maximum: u32| {
         if !(1..=maximum).contains(&value) {
@@ -1552,7 +1562,11 @@ fn encode_display_id_timing(
     let byte3 = timing.aspect_ratio.nibble()
         | (u8::from(timing.interlaced) << 4)
         | (timing.stereo_3d.bits() << 5)
-        | (u8::from(timing.preferred || timing.ycbcr420) << 7);
+        | (u8::from(if block_revision < 2 {
+            timing.preferred
+        } else {
+            timing.ycbcr420
+        }) << 7);
     bytes[3] = byte3;
     bytes[4..6].copy_from_slice(&h_active.to_le_bytes());
     bytes[6..8].copy_from_slice(&h_blank.to_le_bytes());
