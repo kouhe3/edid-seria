@@ -2748,6 +2748,18 @@ mod tests {
         assert!(lpcm.lpcm_supports_sample_size(20));
         assert!(lpcm.lpcm_supports_sample_size(24));
         assert_eq!(lpcm.lpcm_sample_size_bits(), &[16, 20, 24]);
+
+        // A descriptor supporting only 16+20-bit must not report 24-bit.
+        let partial = CtaAudioDescriptor {
+            format: 1,
+            channels: 2,
+            sample_rates: 0b000_0111,
+            format_specific: 0b011,
+        };
+        assert_eq!(partial.lpcm_sample_size_bits(), &[16, 20]);
+        assert!(partial.lpcm_supports_sample_size(16));
+        assert!(partial.lpcm_supports_sample_size(20));
+        assert!(!partial.lpcm_supports_sample_size(24));
         assert_eq!(lpcm.channels, 2);
 
         // Compressed format: AC-3 has no LPCM sample size.

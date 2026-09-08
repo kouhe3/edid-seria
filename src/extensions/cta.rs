@@ -248,14 +248,17 @@ impl CtaAudioDescriptor {
             0b000 => &[],
             0b001 => &[16],
             0b010 => &[20],
+            0b011 => &[16, 20],
             0b100 => &[24],
-            // Bit patterns are a combination; the common cases cover single sizes.
-            _ => &[16, 20, 24],
+            0b101 => &[16, 24],
+            0b110 => &[20, 24],
+            0b111 => &[16, 20, 24],
+            // Unreachable after the `& 0x07` mask; a safe empty default.
+            _ => &[],
         }
     }
 
     /// Return whether the LPCM descriptor supports the given sample size in bits.
-    #[must_use]
     pub const fn lpcm_supports_sample_size(&self, bits: u8) -> bool {
         if self.format != 1 {
             return false;
