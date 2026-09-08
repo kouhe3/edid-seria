@@ -42,7 +42,7 @@ CRU-style display override tools.
 
 ```toml
 [dependencies]
-edid-seria = "0.1"
+edid-seria = "0.3"
 ```
 
 ```rust,no_run
