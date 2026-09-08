@@ -141,6 +141,44 @@ pub struct CtaDataBlock {
     pub payload: Vec<u8>,
 }
 
+/// CTA-861 audio coding format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CtaAudioFormat {
+    /// Linear PCM (code 1).
+    Lpcm,
+    /// AC-3 (code 2).
+    Ac3,
+    /// MPEG-1, layers 1 & 2 (code 3).
+    Mpeg1,
+    /// MPEG-1 layer 3 / MP3 (code 4).
+    Mp3,
+    /// MPEG-2 multichannel (code 5).
+    Mpeg2,
+    /// AAC LC (code 6).
+    AacLc,
+    /// DTS (code 7).
+    Dts,
+    /// ATRAC (code 8).
+    Atrac,
+    /// One Bit Audio (code 9).
+    OneBitAudio,
+    /// Enhanced AC-3 / DD+ (code 10).
+    EnhancedAc3,
+    /// DTS-HD (code 11).
+    DtsHd,
+    /// MAT / MLP (code 12).
+    MatMlp,
+    /// DST (code 13).
+    Dst,
+    /// WMA Pro (code 14).
+    WmaPro,
+    /// Extended audio format (code 15); the format code is in the third byte.
+    Extended,
+    /// Reserved / unknown code (0 or > 15).
+    Reserved,
+}
+
 /// A CTA Short Audio Descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CtaAudioDescriptor {
@@ -148,10 +186,144 @@ pub struct CtaAudioDescriptor {
     pub format: u8,
     /// Maximum channel count.
     pub channels: u8,
-    /// Supported sample-rate bit mask.
+    /// Supported sample-rate bit mask (bit0=32k, bit1=44.1k, bit2=48k,
+    /// bit3=88.2k, bit4=96k, bit5=176.4k, bit6=192k).
     pub sample_rates: u8,
     /// Format-specific third byte.
     pub format_specific: u8,
+}
+
+impl CtaAudioDescriptor {
+    /// Map the raw format code to a typed [`CtaAudioFormat`].
+    #[must_use]
+    pub const fn format_kind(&self) -> CtaAudioFormat {
+        match self.format {
+            1 => CtaAudioFormat::Lpcm,
+            2 => CtaAudioFormat::Ac3,
+            3 => CtaAudioFormat::Mpeg1,
+            4 => CtaAudioFormat::Mp3,
+            5 => CtaAudioFormat::Mpeg2,
+            6 => CtaAudioFormat::AacLc,
+            7 => CtaAudioFormat::Dts,
+            8 => CtaAudioFormat::Atrac,
+            9 => CtaAudioFormat::OneBitAudio,
+            10 => CtaAudioFormat::EnhancedAc3,
+            11 => CtaAudioFormat::DtsHd,
+            12 => CtaAudioFormat::MatMlp,
+            13 => CtaAudioFormat::Dst,
+            14 => CtaAudioFormat::WmaPro,
+            15 => CtaAudioFormat::Extended,
+            _ => CtaAudioFormat::Reserved,
+        }
+    }
+
+    /// Return whether the given nominal sample rate in kHz is supported.
+    ///
+    /// Valid `khz` values are 32, 44, 48, 88, 96, 176, and 192 (44 / 88 / 176
+    /// denote the 44.1 / 88.2 / 176.4 kHz rates).
+    #[must_use]
+    pub const fn supports_sample_rate(&self, khz: u16) -> bool {
+        let bit = match khz {
+            32 => 0,
+            44 => 1,
+            48 => 2,
+            88 => 3,
+            96 => 4,
+            176 => 5,
+            192 => 6,
+            _ => return false,
+        };
+        self.sample_rates & (1 << bit) != 0
+    }
+
+    /// Return the LPCM sample sizes in bits (a subset of 16, 20, 24), or empty
+    /// when this descriptor is not LPCM.
+    #[must_use]
+    pub const fn lpcm_sample_size_bits(&self) -> &'static [u8] {
+        if self.format != 1 {
+            return &[];
+        }
+        // LPCM: byte2 bit0=16, bit1=20, bit2=24 (bits 7..3 reserved).
+        match self.format_specific & 0x07 {
+            0b000 => &[],
+            0b001 => &[16],
+            0b010 => &[20],
+            0b011 => &[16, 20],
+            0b100 => &[24],
+            0b101 => &[16, 24],
+            0b110 => &[20, 24],
+            0b111 => &[16, 20, 24],
+            // Unreachable after the `& 0x07` mask; a safe empty default.
+            _ => &[],
+        }
+    }
+
+    /// Return whether the LPCM descriptor supports the given sample size in bits.
+    pub const fn lpcm_supports_sample_size(&self, bits: u8) -> bool {
+        if self.format != 1 {
+            return false;
+        }
+        let mask = match bits {
+            16 => 0b001,
+            20 => 0b010,
+            24 => 0b100,
+            _ => return false,
+        };
+        self.format_specific & mask != 0
+    }
+}
+
+/// A CTA-861 HDR Dynamic Metadata entry.
+///
+/// Each entry is `[type_len][type_lo][type_hi][data...]`. The complete
+/// type-specific bytes are kept verbatim in `data` so unknown fields survive a
+/// typed round-trip; `version` and the SL-HDR flags are read-only views over it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtaHdrDynamicMetadataEntry {
+    /// HDR dynamic metadata type (e.g. 1 = ST 2094-10, 2 = SL-HDR, 4 = ST 2094-40).
+    pub metadata_type: u16,
+    /// Complete type-specific payload bytes (bytes after the 2-byte type).
+    pub data: Vec<u8>,
+    /// Original complete entry bytes (type_len byte + 2-byte type + data).
+    pub raw: Vec<u8>,
+}
+
+impl CtaHdrDynamicMetadataEntry {
+    /// Return the version for types 1, 2, and 4 (low nibble of the first data byte),
+    /// or `None` for other types or empty payload.
+    #[must_use]
+    pub fn version(&self) -> Option<u8> {
+        if matches!(self.metadata_type, 1 | 2 | 4) && !self.data.is_empty() {
+            Some(self.data[0] & 0x0F)
+        } else {
+            None
+        }
+    }
+
+    /// Whether SL-HDR1 (ETSI TS 103 433-1) is supported (type 2, version >= 1).
+    #[must_use]
+    pub fn sl_hdr1(&self) -> bool {
+        self.sl_flag(0x10)
+    }
+
+    /// Whether SL-HDR2 (ETSI TS 103 433-2) is supported (type 2, version >= 1).
+    #[must_use]
+    pub fn sl_hdr2(&self) -> bool {
+        self.sl_flag(0x20)
+    }
+
+    /// Whether SL-HDR3 (ETSI TS 103 433-3) is supported (type 2, version >= 1).
+    #[must_use]
+    pub fn sl_hdr3(&self) -> bool {
+        self.sl_flag(0x40)
+    }
+
+    fn sl_flag(&self, mask: u8) -> bool {
+        self.metadata_type == 2
+            && self.version().is_some_and(|v| v >= 1)
+            && !self.data.is_empty()
+            && (self.data[0] & mask != 0)
+    }
 }
 
 /// A CTA Video Data Block entry.
@@ -187,8 +359,22 @@ pub enum CtaVendorSpecificBlock {
         max_tmds_character_rate_mhz: Option<u16>,
         /// SCDC and scrambling capability flags (byte 5).
         scdc_flags: u8,
+        /// Maximum Fixed Rate Link rate code (0..=6), if present (byte 6 bits 7..4).
+        max_frl_rate: Option<u8>,
         /// Deep Color 4:2:0 support flags (byte 7).
         deep_color_420_flags: u8,
+        /// VRR, ALLM, FVA, and gaming capability flags (byte 8), if present.
+        vrr_flags: Option<u8>,
+        /// Minimum supported VRR refresh rate in Hz (byte 9 bits 0..5), if present.
+        vrr_min_hz: Option<u8>,
+        /// Maximum supported VRR refresh rate in Hz (byte 9 bits 6..7 + byte 10), if present.
+        vrr_max_hz: Option<u16>,
+        /// DSC 1.2 capability flags (byte 11), if present.
+        dsc_flags: Option<u8>,
+        /// DSC max slices and max FRL rate (byte 12), if present.
+        dsc_max_slices: Option<u8>,
+        /// DSC total chunk kbytes (byte 13), if present.
+        dsc_total_chunk_kbytes: Option<u8>,
         /// Original payload including the 3-byte OUI.
         raw: Vec<u8>,
     },
@@ -219,6 +405,35 @@ pub enum CtaVendorSpecificBlock {
         /// Payload bytes after the 3-byte OUI.
         payload: Vec<u8>,
     },
+}
+
+impl CtaVendorSpecificBlock {
+    /// Return whether this VSDB represents HDMI Forum with ALLM (Auto Low Latency Mode).
+    #[must_use]
+    pub fn is_allm_supported(&self) -> bool {
+        match self {
+            Self::HdmiForum { vrr_flags, .. } => vrr_flags.is_some_and(|f| (f & (1 << 1)) != 0),
+            _ => false,
+        }
+    }
+
+    /// Return whether this VSDB represents HDMI Forum with Fast Vactive (FVA).
+    #[must_use]
+    pub fn is_fva_supported(&self) -> bool {
+        match self {
+            Self::HdmiForum { vrr_flags, .. } => vrr_flags.is_some_and(|f| (f & (1 << 2)) != 0),
+            _ => false,
+        }
+    }
+
+    /// Return whether this VSDB represents HDMI Forum with Cinema VRR.
+    #[must_use]
+    pub fn is_cinema_vrr_supported(&self) -> bool {
+        match self {
+            Self::HdmiForum { vrr_flags, .. } => vrr_flags.is_some_and(|f| (f & (1 << 4)) != 0),
+            _ => false,
+        }
+    }
 }
 
 /// Typed read-only views for CTA data blocks.
@@ -270,11 +485,25 @@ pub enum CtaExtendedDataBlockView {
         /// Original extended-tag-prefixed payload.
         raw: Vec<u8>,
     },
-    /// CTA Adaptive-Sync Data Block, extended tag 0x1A; raw fields retained.
-    AdaptiveSync {
+    /// CTA-861 HDR Dynamic Metadata Data Block, extended tag 0x07.
+    HdrDynamicMetadata {
+        /// Dynamic HDR metadata entries in source order.
+        entries: Vec<CtaHdrDynamicMetadataEntry>,
         /// Original extended-tag-prefixed payload.
         raw: Vec<u8>,
     },
+    /// YCbCr 4:2:0 Video Data Block, extended tag 0x0E.
+    Y420Video {
+        /// 4:2:0-only Video Identification Code entries.
+        modes: Vec<CtaVideoMode>,
+    },
+    /// YCbCr 4:2:0 Capability Map Data Block, extended tag 0x0F.
+    Y420CapabilityMap {
+        /// Original extended-tag-prefixed payload.
+        raw: Vec<u8>,
+    },
+    /// CTA Adaptive-Sync Data Block, extended tag 0x1A.
+    AdaptiveSync(CtaAdaptiveSync),
     /// An unsupported CTA extended data block.
     Unknown {
         /// Extended tag code.
@@ -282,6 +511,140 @@ pub enum CtaExtendedDataBlockView {
         /// Payload bytes after the extended tag.
         payload: Vec<u8>,
     },
+}
+
+/// A CTA-861 Adaptive-Sync Data Block (Extended Tag 0x1A).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtaAdaptiveSync {
+    /// Capability and descriptor flags (byte 1).
+    pub flags: u8,
+    /// Minimum supported refresh rate in Hz (byte 2).
+    pub min_refresh_hz: u8,
+    /// Maximum supported refresh rate in Hz (byte 3).
+    pub max_refresh_hz: u8,
+    /// Original extended-tag-prefixed payload (`[0x1A, ...]`).
+    pub raw: Vec<u8>,
+}
+
+impl CtaAdaptiveSync {
+    /// Create a new Adaptive-Sync descriptor with the specified refresh rates and flags.
+    pub fn new(
+        min_refresh_hz: u8,
+        max_refresh_hz: u8,
+        flags: u8,
+    ) -> Result<Self, ExtensionWriteError> {
+        if min_refresh_hz == 0 || max_refresh_hz == 0 || min_refresh_hz > max_refresh_hz {
+            return Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz,
+                max_refresh_hz,
+            });
+        }
+        let raw = vec![0x1A, flags, min_refresh_hz, max_refresh_hz];
+        Ok(Self {
+            flags,
+            min_refresh_hz,
+            max_refresh_hz,
+            raw,
+        })
+    }
+}
+
+/// Resolved CTA-861 YCbCr 4:2:0 video capabilities for a CTA data collection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtaY420Support {
+    /// Video modes from regular Video Data Blocks that also support YCbCr 4:2:0 (via Capability Map).
+    pub capability_map_modes: Vec<CtaVideoMode>,
+    /// Video modes that only support YCbCr 4:2:0 (from Y420 Video Data Blocks).
+    pub only_420_modes: Vec<CtaVideoMode>,
+}
+
+impl CtaY420Support {
+    /// Resolve YCbCr 4:2:0 video capabilities across a collection of CTA data blocks.
+    pub fn resolve_from_blocks(blocks: &[CtaDataBlock]) -> Result<Self, ExtensionError> {
+        let mut standard_svds = Vec::new();
+        let mut only_420_modes = Vec::new();
+        let mut capability_maps = Vec::new();
+
+        for block in blocks {
+            match block.view()? {
+                CtaDataBlockView::Video { modes } => {
+                    standard_svds.extend(modes);
+                }
+                CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420Video { modes }) => {
+                    only_420_modes.extend(modes);
+                }
+                CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420CapabilityMap { raw }) => {
+                    capability_maps.push(raw);
+                }
+                _ => {}
+            }
+        }
+
+        let mut capability_map_modes = Vec::new();
+        if !capability_maps.is_empty() {
+            if standard_svds.is_empty() {
+                return Err(ExtensionError::Y420CapabilityMapMissingVideoDataBlock);
+            }
+            for raw in &capability_maps {
+                if raw.len() <= 1 {
+                    for &mode in &standard_svds {
+                        if !capability_map_modes.contains(&mode) {
+                            capability_map_modes.push(mode);
+                        }
+                    }
+                } else {
+                    for (byte_offset, &byte) in raw[1..].iter().enumerate() {
+                        for bit in 0..8 {
+                            if (byte & (1 << bit)) != 0 {
+                                let svd_index = byte_offset * 8 + bit;
+                                if svd_index >= standard_svds.len() {
+                                    return Err(ExtensionError::Y420CapabilityMapIndexOutOfRange {
+                                        index: svd_index,
+                                        available_svds: standard_svds.len(),
+                                    });
+                                }
+                                let mode = standard_svds[svd_index];
+                                if !capability_map_modes.contains(&mode) {
+                                    capability_map_modes.push(mode);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            capability_map_modes,
+            only_420_modes,
+        })
+    }
+
+    /// Returns all VICs supporting YCbCr 4:2:0 without duplicates.
+    #[must_use]
+    pub fn all_420_vics(&self) -> Vec<u8> {
+        let mut vics = Vec::new();
+        for mode in self.capability_map_modes.iter().chain(&self.only_420_modes) {
+            if !vics.contains(&mode.vic) {
+                vics.push(mode.vic);
+            }
+        }
+        vics
+    }
+
+    /// Returns whether the specified VIC supports YCbCr 4:2:0.
+    #[must_use]
+    pub fn supports_vic(&self, vic: u8) -> bool {
+        self.capability_map_modes.iter().any(|m| m.vic == vic)
+            || self.only_420_modes.iter().any(|m| m.vic == vic)
+    }
+
+    /// Returns whether the specified VIC is 4:2:0-only.
+    #[must_use]
+    pub fn is_420_only(&self, vic: u8) -> bool {
+        self.only_420_modes.iter().any(|m| m.vic == vic)
+            && !self.capability_map_modes.iter().any(|m| m.vic == vic)
+    }
 }
 fn vendor_payload_template(
     raw: &[u8],
@@ -460,10 +823,54 @@ impl CtaDataBlockView {
                     payload: encoded,
                 })
             }
-            Self::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw }) => {
-                if raw.first().copied() != Some(0x1A) {
+            Self::Extended(CtaExtendedDataBlockView::AdaptiveSync(adaptive_sync)) => {
+                if adaptive_sync.raw.len() < 4 || adaptive_sync.raw.first().copied() != Some(0x1A) {
                     return Err(ExtensionWriteError::InvalidCtaExtendedPayload {
                         expected_tag: 0x1A,
+                        actual_tag: adaptive_sync.raw.first().copied(),
+                        length: adaptive_sync.raw.len(),
+                    });
+                }
+                if adaptive_sync.min_refresh_hz == 0
+                    || adaptive_sync.max_refresh_hz == 0
+                    || adaptive_sync.min_refresh_hz > adaptive_sync.max_refresh_hz
+                {
+                    return Err(ExtensionWriteError::InvalidRefreshRateRange {
+                        min_refresh_hz: adaptive_sync.min_refresh_hz,
+                        max_refresh_hz: adaptive_sync.max_refresh_hz,
+                    });
+                }
+                let mut payload = adaptive_sync.raw.clone();
+                payload[1] = adaptive_sync.flags;
+                payload[2] = adaptive_sync.min_refresh_hz;
+                payload[3] = adaptive_sync.max_refresh_hz;
+                Ok(CtaDataBlock { tag: 7, payload })
+            }
+            Self::Extended(CtaExtendedDataBlockView::Y420Video { modes }) => {
+                if modes.is_empty() {
+                    return Err(ExtensionWriteError::CtaPayloadTooShort {
+                        tag: 7,
+                        length: 0,
+                        minimum: 1,
+                    });
+                }
+                let mut payload = Vec::with_capacity(modes.len() + 1);
+                payload.push(0x0E);
+                for (index, mode) in modes.iter().enumerate() {
+                    if !(1..=127).contains(&mode.vic) {
+                        return Err(ExtensionWriteError::InvalidCtaVideoCode {
+                            index,
+                            vic: mode.vic,
+                        });
+                    }
+                    payload.push(mode.vic | (u8::from(mode.native) << 7));
+                }
+                Ok(CtaDataBlock { tag: 7, payload })
+            }
+            Self::Extended(CtaExtendedDataBlockView::Y420CapabilityMap { raw }) => {
+                if raw.first().copied() != Some(0x0F) {
+                    return Err(ExtensionWriteError::InvalidCtaExtendedPayload {
+                        expected_tag: 0x0F,
                         actual_tag: raw.first().copied(),
                         length: raw.len(),
                     });
@@ -505,7 +912,14 @@ impl CtaDataBlockView {
                 version,
                 max_tmds_character_rate_mhz,
                 scdc_flags,
+                max_frl_rate,
                 deep_color_420_flags,
+                vrr_flags,
+                vrr_min_hz,
+                vrr_max_hz,
+                dsc_flags,
+                dsc_max_slices,
+                dsc_total_chunk_kbytes,
                 raw,
             }) => {
                 let mut payload = vendor_payload_template(raw, [0xD8, 0x5D, 0xC4])?;
@@ -518,7 +932,113 @@ impl CtaDataBlockView {
                     "max_tmds_character_rate_mhz",
                 )?;
                 write_vendor_byte(&mut payload, raw, 5, *scdc_flags, 0)?;
+                if let Some(frl) = *max_frl_rate {
+                    if frl > 6 {
+                        return Err(ExtensionWriteError::InvalidCtaField {
+                            field: "max_frl_rate",
+                            value: frl,
+                            maximum: 6,
+                        });
+                    }
+                    if raw.len() <= 6 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 7,
+                        });
+                    }
+                    payload[6] = (payload[6] & 0x0F) | (frl << 4);
+                } else if raw.len() > 6 && (raw[6] >> 4) != 0 {
+                    return Err(ExtensionWriteError::InvalidCtaVendorField {
+                        field: "max_frl_rate",
+                    });
+                }
                 write_vendor_byte(&mut payload, raw, 7, *deep_color_420_flags, 0)?;
+                if let Some(flags) = *vrr_flags {
+                    if raw.len() <= 8 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 9,
+                        });
+                    }
+                    payload[8] = flags;
+                } else if raw.len() > 8 && raw[8] != 0 {
+                    return Err(ExtensionWriteError::InvalidCtaVendorField { field: "vrr_flags" });
+                }
+                if let (Some(min), Some(max)) = (*vrr_min_hz, *vrr_max_hz)
+                    && max > 0
+                    && u16::from(min) > max
+                {
+                    return Err(ExtensionWriteError::InvalidRefreshRateRange {
+                        min_refresh_hz: min,
+                        max_refresh_hz: max as u8,
+                    });
+                }
+                if let Some(min) = *vrr_min_hz {
+                    if min > 63 {
+                        return Err(ExtensionWriteError::InvalidCtaField {
+                            field: "vrr_min_hz",
+                            value: min,
+                            maximum: 63,
+                        });
+                    }
+                    if raw.len() <= 9 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 10,
+                        });
+                    }
+                    payload[9] = (payload[9] & 0xC0) | (min & 0x3F);
+                }
+                if let Some(max) = *vrr_max_hz {
+                    if max > 1023 {
+                        return Err(ExtensionWriteError::InvalidCtaVendorField {
+                            field: "vrr_max_hz",
+                        });
+                    }
+                    if raw.len() <= 10 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 11,
+                        });
+                    }
+                    let upper = ((max >> 8) & 0x03) as u8;
+                    payload[9] = (payload[9] & 0x3F) | (upper << 6);
+                    payload[10] = (max & 0xFF) as u8;
+                }
+                if let Some(flags) = *dsc_flags {
+                    if raw.len() <= 11 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 12,
+                        });
+                    }
+                    payload[11] = flags;
+                }
+                if let Some(slices) = *dsc_max_slices {
+                    if raw.len() <= 12 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 13,
+                        });
+                    }
+                    payload[12] = slices;
+                }
+                if let Some(chunks) = *dsc_total_chunk_kbytes {
+                    if raw.len() <= 13 {
+                        return Err(ExtensionWriteError::CtaPayloadTooShort {
+                            tag: 3,
+                            length: raw.len(),
+                            minimum: 14,
+                        });
+                    }
+                    payload[13] = chunks;
+                }
                 Ok(CtaDataBlock { tag: 3, payload })
             }
             Self::VendorSpecific(CtaVendorSpecificBlock::AmdFreeSync {
@@ -647,6 +1167,31 @@ impl CtaDataBlockView {
                 }
                 if raw.len() > raw_prefix_length {
                     payload.extend_from_slice(&raw[raw_prefix_length..]);
+                }
+                Ok(CtaDataBlock { tag: 7, payload })
+            }
+            Self::Extended(CtaExtendedDataBlockView::HdrDynamicMetadata { entries, .. }) => {
+                let mut payload = vec![0x07];
+                for (index, entry) in entries.iter().enumerate() {
+                    let data_len = entry.data.len();
+                    let type_len = 2 + data_len;
+                    if type_len < 2 {
+                        return Err(ExtensionWriteError::InvalidHdrDynamicMetadataEntry {
+                            index,
+                            reason: "entry length below minimum",
+                        });
+                    }
+                    if (1 + type_len).checked_add(payload.len()).is_none()
+                        || payload.len() + 1 + type_len > 0x1F
+                    {
+                        return Err(ExtensionWriteError::InvalidHdrDynamicMetadataEntry {
+                            index,
+                            reason: "entry overflows block payload",
+                        });
+                    }
+                    payload.push(type_len as u8);
+                    payload.extend_from_slice(&entry.metadata_type.to_le_bytes());
+                    payload.extend_from_slice(&entry.data);
                 }
                 Ok(CtaDataBlock { tag: 7, payload })
             }
@@ -820,11 +1365,113 @@ impl CtaDataBlock {
                     },
                 ))
             }
-            0x1A => Ok(CtaDataBlockView::Extended(
-                CtaExtendedDataBlockView::AdaptiveSync {
+            0x07 => {
+                let body = &self.payload[1..];
+                let mut entries = Vec::new();
+                let mut offset = 0;
+                let mut index = 0;
+                if body.is_empty() {
+                    return Err(ExtensionError::TruncatedExtendedDataBlock {
+                        extended_tag,
+                        length: self.payload.len(),
+                        minimum: 2,
+                    });
+                }
+                while offset < body.len() {
+                    if body.len() - offset < 3 {
+                        return Err(ExtensionError::TruncatedDynamicHdrMetadataEntry {
+                            index,
+                            length: body.len() - offset,
+                            minimum: 3,
+                        });
+                    }
+                    let type_len = body[offset] as usize;
+                    if type_len < 2 {
+                        return Err(ExtensionError::InvalidDynamicHdrMetadataLength {
+                            index,
+                            length: type_len,
+                        });
+                    }
+                    let entry_end = offset + 1 + type_len;
+                    if entry_end > body.len() {
+                        return Err(ExtensionError::TruncatedDynamicHdrMetadataEntry {
+                            index,
+                            length: type_len,
+                            minimum: body.len() - offset,
+                        });
+                    }
+                    let metadata_type = u16::from_le_bytes([body[offset + 1], body[offset + 2]]);
+                    let data = body[offset + 3..entry_end].to_vec();
+                    let raw = body[offset..entry_end].to_vec();
+                    entries.push(CtaHdrDynamicMetadataEntry {
+                        metadata_type,
+                        data,
+                        raw,
+                    });
+                    offset = entry_end;
+                    index += 1;
+                }
+                Ok(CtaDataBlockView::Extended(
+                    CtaExtendedDataBlockView::HdrDynamicMetadata {
+                        entries,
+                        raw: self.payload.clone(),
+                    },
+                ))
+            }
+            0x0E => {
+                if self.payload.len() < 2 {
+                    return Err(ExtensionError::TruncatedExtendedDataBlock {
+                        extended_tag,
+                        length: self.payload.len(),
+                        minimum: 2,
+                    });
+                }
+                let mut modes = Vec::with_capacity(self.payload.len() - 1);
+                for (index, &code) in self.payload[1..].iter().enumerate() {
+                    let vic = code & 0x7F;
+                    if vic == 0 {
+                        return Err(ExtensionError::InvalidVideoCode { index });
+                    }
+                    modes.push(CtaVideoMode {
+                        vic,
+                        native: code & 0x80 != 0,
+                    });
+                }
+                Ok(CtaDataBlockView::Extended(
+                    CtaExtendedDataBlockView::Y420Video { modes },
+                ))
+            }
+            0x0F => Ok(CtaDataBlockView::Extended(
+                CtaExtendedDataBlockView::Y420CapabilityMap {
                     raw: self.payload.clone(),
                 },
             )),
+            0x1A => {
+                if self.payload.len() < 4 {
+                    return Err(ExtensionError::TruncatedExtendedDataBlock {
+                        extended_tag,
+                        length: self.payload.len(),
+                        minimum: 4,
+                    });
+                }
+                let flags = self.payload[1];
+                let min_refresh_hz = self.payload[2];
+                let max_refresh_hz = self.payload[3];
+                if min_refresh_hz == 0 || max_refresh_hz == 0 || min_refresh_hz > max_refresh_hz {
+                    return Err(ExtensionError::InvalidRefreshRateRange {
+                        min_refresh_hz,
+                        max_refresh_hz,
+                    });
+                }
+                Ok(CtaDataBlockView::Extended(
+                    CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                        flags,
+                        min_refresh_hz,
+                        max_refresh_hz,
+                        raw: self.payload.clone(),
+                    }),
+                ))
+            }
             extended_tag => Ok(CtaDataBlockView::Extended(
                 CtaExtendedDataBlockView::Unknown {
                     extended_tag,
@@ -877,13 +1524,34 @@ impl CtaDataBlock {
                     .filter(|&b| b != 0)
                     .map(|b| b as u16 * 5);
                 let scdc_flags = self.payload.get(5).copied().unwrap_or(0);
+                let max_frl_rate = self.payload.get(6).map(|&b| b >> 4);
                 let deep_color_420_flags = self.payload.get(7).copied().unwrap_or(0);
+                let vrr_flags = self.payload.get(8).copied();
+                let vrr_min_hz = self.payload.get(9).map(|&b| b & 0x3F).filter(|&b| b != 0);
+                let vrr_max_hz = if self.payload.len() >= 11 {
+                    let b9 = self.payload[9];
+                    let b10 = self.payload[10];
+                    let max = (u16::from(b9 & 0xC0) << 2) | u16::from(b10);
+                    if max != 0 { Some(max) } else { None }
+                } else {
+                    None
+                };
+                let dsc_flags = self.payload.get(11).copied();
+                let dsc_max_slices = self.payload.get(12).copied();
+                let dsc_total_chunk_kbytes = self.payload.get(13).copied();
                 Ok(CtaDataBlockView::VendorSpecific(
                     CtaVendorSpecificBlock::HdmiForum {
                         version,
                         max_tmds_character_rate_mhz,
                         scdc_flags,
+                        max_frl_rate,
                         deep_color_420_flags,
+                        vrr_flags,
+                        vrr_min_hz,
+                        vrr_max_hz,
+                        dsc_flags,
+                        dsc_max_slices,
+                        dsc_total_chunk_kbytes,
                         raw: self.payload.clone(),
                     },
                 ))

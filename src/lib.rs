@@ -10,6 +10,7 @@
 //! No OS dependencies; the registry and elevation glue lives in `cru-rs`.
 
 pub mod builder;
+pub mod capabilities;
 pub mod edid;
 pub mod error;
 pub mod extensions;
@@ -17,6 +18,10 @@ pub mod metadata;
 pub mod serialize;
 pub use builder::{BaseBlockBuilder, BaseBlockError, TimingPlacement};
 pub mod timing;
+pub use capabilities::{
+    AudioSource, CapabilitySource, DisplayCapabilities, DisplayTiming, InterfaceSource,
+    TimingSource, VrrRange,
+};
 pub use edid::{
     DecodedDtd, DtdFlags, EDID_BLOCK_SIZE, Edid, EdidBlock, MAX_EDID_BLOCKS, MAX_EDID_BYTES,
 };
@@ -25,10 +30,13 @@ pub use error::{
     ModelineError, SerializeError,
 };
 pub use extensions::{
-    CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
-    CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
+    CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
+    CtaDataBlockView, CtaExtendedDataBlockView, CtaHdrDynamicMetadataEntry, CtaHeader,
+    CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
     DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
-    DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
+    DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange, DisplayIdEnumeratedTiming,
+    DisplayIdFormulaTiming, DisplayIdHeader, DisplayIdInterfaceFeatures, DisplayIdOrdering,
+    DisplayIdProductIdentification, DisplayIdTiledDisplayTopology, ExtensionError, ExtensionKind,
     ExtensionWriteError,
 };
 pub use metadata::{

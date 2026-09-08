@@ -5,8 +5,9 @@ use crate::edid::EdidBlock;
 mod cta;
 
 pub use cta::{
-    CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
-    CtaHeader, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
+    CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
+    CtaDataBlockView, CtaExtendedDataBlockView, CtaHdrDynamicMetadataEntry, CtaHeader,
+    CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
 };
 
 /// Recognized kind of an EDID extension block.
@@ -146,13 +147,255 @@ pub struct DisplayIdDisplayParameters {
     pub raw: Vec<u8>,
 }
 
+/// DisplayID Dynamic Video Timing Range Limits Data Block (Tag 0x25 in 2.0, Tag 0x09 in 1.x).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdDynamicVideoTimingRange {
+    /// Minimum pixel clock in kHz (1 kHz .. 16,777,216 kHz).
+    pub min_pixel_clock_khz: u32,
+    /// Maximum pixel clock in kHz (1 kHz .. 16,777,216 kHz).
+    pub max_pixel_clock_khz: u32,
+    /// Minimum vertical refresh rate in Hz.
+    pub min_vfreq_hz: u8,
+    /// Maximum vertical refresh rate in Hz.
+    pub max_vfreq_hz: u16,
+    /// Seamless dynamic video timing change / VRR support flag.
+    pub seamless_dynamic_video_timing: bool,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+/// DisplayID Display Interface Features Data Block (Tag 0x26 in 2.0, Tag 0x0F in 1.x).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdInterfaceFeatures {
+    /// Color-depth support for RGB encoding (byte 0): bit0=6bpc, bit1=8bpc,
+    /// bit2=10bpc, bit3=12bpc, bit4=14bpc, bit5=16bpc.
+    pub color_depth_rgb: u8,
+    /// Color-depth support for YCbCr 4:4:4 encoding (byte 1).
+    pub color_depth_ycbcr444: u8,
+    /// Color-depth support for YCbCr 4:2:2 encoding (byte 2).
+    pub color_depth_ycbcr422: u8,
+    /// Color-depth support for YCbCr 4:2:0 encoding (byte 3).
+    pub color_depth_ycbcr420: u8,
+    /// Minimum pixel rate for YCbCr 4:2:0 in 74.25 MP/s units, 0 = supported at all modes (byte 4).
+    pub min_ycbcr420_pixel_rate: u8,
+    /// Audio capability and feature support flags (byte 5).
+    pub audio_flags: u8,
+    /// Color space and EOTF combination 1 flags (byte 6).
+    pub colorspace_eotf_1: u8,
+    /// Color space and EOTF combination 2 flags, reserved (byte 7).
+    pub colorspace_eotf_2: u8,
+    /// Number of additional color space and EOTF bytes (byte 8).
+    pub additional_colorspace_count: u8,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+impl DisplayIdInterfaceFeatures {
+    /// Return whether the given RGB bit depth (6, 8, 10, 12, 14, or 16 bpc) is supported.
+    #[must_use]
+    pub const fn supports_rgb_bpc(&self, bpc: u8) -> bool {
+        Self::supports_rgb_bpc_flags(self.color_depth_rgb, bpc)
+    }
+
+    /// Return whether the given YCbCr 4:4:4 bit depth is supported.
+    #[must_use]
+    pub const fn supports_ycbcr444_bpc(&self, bpc: u8) -> bool {
+        Self::supports_ycbcr_bpc_flags(self.color_depth_ycbcr444, bpc)
+    }
+
+    /// Return whether the given YCbCr 4:2:2 bit depth is supported.
+    #[must_use]
+    pub const fn supports_ycbcr422_bpc(&self, bpc: u8) -> bool {
+        Self::supports_ycbcr_bpc_flags(self.color_depth_ycbcr422, bpc)
+    }
+
+    /// Return whether the given YCbCr 4:2:0 bit depth is supported.
+    #[must_use]
+    pub const fn supports_ycbcr420_bpc(&self, bpc: u8) -> bool {
+        Self::supports_ycbcr_bpc_flags(self.color_depth_ycbcr420, bpc)
+    }
+
+    /// RGB encoding bit-depth bit positions: bit0=6bpc, bit1=8bpc, ..., bit5=16bpc.
+    const fn supports_rgb_bpc_flags(flags: u8, bpc: u8) -> bool {
+        matches!(bpc, 6 | 8 | 10 | 12 | 14 | 16) && (flags & (1 << ((bpc / 2) - 3))) != 0
+    }
+
+    /// YCbCr (4:4:4 / 4:2:2 / 4:2:0) bit-depth bit positions: bit0=8bpc, bit1=10bpc, ..., bit4=16bpc.
+    const fn supports_ycbcr_bpc_flags(flags: u8, bpc: u8) -> bool {
+        matches!(bpc, 8 | 10 | 12 | 14 | 16) && (flags & (1 << ((bpc / 2) - 4))) != 0
+    }
+
+    /// Return whether BT.2020 color space with SMPTE ST 2084 (PQ) EOTF is supported.
+    #[must_use]
+    pub const fn supports_bt2020_st2084(&self) -> bool {
+        self.colorspace_eotf_1 & (1 << 6) != 0
+    }
+
+    /// Return whether BT.2020 color space with the BT.2020 EOTF is supported.
+    #[must_use]
+    pub const fn supports_bt2020(&self) -> bool {
+        self.colorspace_eotf_1 & (1 << 5) != 0
+    }
+
+    /// Return whether BT.709 color space with BT.1886 EOTF is supported.
+    #[must_use]
+    pub const fn supports_bt709(&self) -> bool {
+        self.colorspace_eotf_1 & (1 << 2) != 0
+    }
+}
+
+/// DisplayID Product Identification Data Block (Tag 0x20 in 2.0, Tag 0x00 in 1.x).
+///
+/// 2.0 uses an IEEE OUI for the vendor; 1.x uses a three-character vendor ID.
+/// The 3-byte `vendor_id` is stored verbatim and `vendor_id_is_oui` distinguishes
+/// the two layouts so a typed round-trip never mixes the field rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdProductIdentification {
+    /// Vendor identifier: 2.0 IEEE OUI bytes or 1.x three-character vendor ID.
+    pub vendor_id: [u8; 3],
+    /// Whether `vendor_id` is a 2.0 IEEE OUI (true) or a 1.x character ID (false).
+    pub vendor_id_is_oui: bool,
+    /// Product code (2 bytes, LSB/MSB).
+    pub product_code: u16,
+    /// Serial number (4 bytes, little-endian), 0 if unspecified.
+    pub serial_number: u32,
+    /// Week of manufacture, 0 = unspecified, 255 = model-year tag.
+    pub week_of_manufacture: u8,
+    /// Year of manufacture / model year (2000 + stored value).
+    pub year: u16,
+    /// Product name raw bytes (exact, possibly non-UTF-8), up to 236 bytes.
+    pub product_name: Vec<u8>,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+impl DisplayIdProductIdentification {
+    /// Return the product name as a UTF-8 slice, or `None` if it is not valid UTF-8.
+    #[must_use]
+    pub fn product_name_str(&self) -> Option<&str> {
+        std::str::from_utf8(&self.product_name).ok()
+    }
+
+    /// Return a lossy UTF-8 view of the product name, replacing invalid sequences.
+    #[must_use]
+    pub fn product_name_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.product_name)
+    }
+
+    /// Whether byte 12 uses the model-year tag (`0xFF`) instead of a manufacture week.
+    #[must_use]
+    pub const fn is_model_year(&self) -> bool {
+        self.week_of_manufacture == 0xFF
+    }
+}
+
+/// DisplayID Tiled Display Topology Data Block (Tag 0x28 in 2.0, Tag 0x12 in 1.x).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdTiledDisplayTopology {
+    /// Raw capability flags byte.
+    pub caps: u8,
+    /// Horizontal tile count (1..=64).
+    pub tiles_h: u8,
+    /// Vertical tile count (1..=64).
+    pub tiles_v: u8,
+    /// Horizontal tile location (0-based).
+    pub tile_location_h: u8,
+    /// Vertical tile location (0-based).
+    pub tile_location_v: u8,
+    /// Tile width in pixels (1..=65536).
+    pub tile_width: u16,
+    /// Tile height in pixels (1..=65536).
+    pub tile_height: u16,
+    /// Pixel multiplier for bevel sizes (0 = no bevel scale).
+    pub pixel_multiplier: u8,
+    /// Top bevel size, present when bevel info is available.
+    pub bevel_top: Option<u8>,
+    /// Bottom bevel size, present when bevel info is available.
+    pub bevel_bottom: Option<u8>,
+    /// Right bevel size, present when bevel info is available.
+    pub bevel_right: Option<u8>,
+    /// Left bevel size, present when bevel info is available.
+    pub bevel_left: Option<u8>,
+    /// Vendor identifier: 2.0 IEEE OUI or 1.x character ID.
+    pub vendor_id: [u8; 3],
+    /// Whether `vendor_id` is a 2.0 IEEE OUI (true) or a 1.x character ID (false).
+    pub vendor_id_is_oui: bool,
+    /// Tiled display product code.
+    pub product_code: u16,
+    /// Tiled display serial number.
+    pub serial_number: u32,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+impl DisplayIdTiledDisplayTopology {
+    /// Whether bevel information is present (capability bit 6).
+    #[must_use]
+    pub const fn has_bevel_info(&self) -> bool {
+        self.caps & 0x40 != 0
+    }
+
+    /// Whether the tiled display is a single physical enclosure (capability bit 7).
+    #[must_use]
+    pub const fn single_enclosure(&self) -> bool {
+        self.caps & 0x80 != 0
+    }
+
+    /// Behavior when this is the only visible tile (capability bits 0..2).
+    #[must_use]
+    pub const fn only_tile_behavior(&self) -> u8 {
+        self.caps & 0x07
+    }
+
+    /// Behavior when more than one tile is visible but not all (capability bits 3..4).
+    #[must_use]
+    pub const fn multi_tile_behavior(&self) -> u8 {
+        (self.caps >> 3) & 0x03
+    }
+}
+
+/// DisplayID Type IX formula-based timing descriptor (part of tag 0x24).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayIdFormulaTiming {
+    /// Horizontal active pixels (1..=65536).
+    pub h_active: u16,
+    /// Vertical active lines (1..=65536).
+    pub v_active: u16,
+    /// Vertical refresh rate in Hz (1..=256).
+    pub v_refresh_hz: u16,
+    /// Timing formula: 0 = CVT, 1 = CVT-RB, 2 = CVT-R2.
+    pub formula: u8,
+    /// Whether the NTSC refresh rate × (1000/1001) variant is supported.
+    pub ntsc_refresh: bool,
+    /// Stereoscopic 3D mode (bits 6..5): 0 = mono, 1 = 3D, 2 = user action.
+    pub stereo_3d: u8,
+}
+
+/// A DisplayID Type VIII enumerated timing code (part of tag 0x23).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayIdEnumeratedTiming {
+    /// Timing code type: 0 = DMT, 1 = CTA VIC, 2 = HDMI VIC.
+    pub code_type: u8,
+    /// Timing code value.
+    pub code: u16,
+}
+
+/// Ordering policy used when re-ordering DisplayID data blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayIdOrdering {
+    /// Keep the source order; the block bytes are left unchanged.
+    PreserveSourceOrder,
+    /// Deterministically sort data blocks by tag, revision, then payload.
+    Canonical,
+}
+
 /// Typed read-only views for DisplayID data blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisplayIdDataBlockView {
     /// DisplayID 1.x or 2.x Product Identification Data Block.
     ProductIdentification {
-        /// Original product-identification payload.
-        raw: Vec<u8>,
+        /// Decoded product identification fields.
+        product: DisplayIdProductIdentification,
     },
     /// DisplayID 1.x or 2.x Display Parameters Data Block.
     DisplayParameters {
@@ -163,6 +406,35 @@ pub enum DisplayIdDataBlockView {
     DetailedTiming {
         /// Timing entries in source order.
         timings: Vec<DisplayIdDetailedTiming>,
+    },
+    /// DisplayID Display Interface Features (Tag 0x26 or Tag 0x0F).
+    InterfaceFeatures {
+        /// Decoded interface features.
+        features: DisplayIdInterfaceFeatures,
+    },
+    /// DisplayID Dynamic Video Timing Range Limits (Tag 0x25 or Tag 0x09).
+    DynamicVideoTimingRange {
+        /// Decoded dynamic video timing range limits.
+        range: DisplayIdDynamicVideoTimingRange,
+    },
+    /// DisplayID Type IX formula-based timings (Tag 0x24).
+    FormulaTiming {
+        /// Formula-based timing descriptors in source order.
+        timings: Vec<DisplayIdFormulaTiming>,
+    },
+    /// DisplayID Type VIII enumerated timing codes (Tag 0x23).
+    EnumeratedTiming {
+        /// Timing code type (DMT / CTA VIC / HDMI VIC) shared by all codes.
+        code_type: u8,
+        /// Timing code size in bytes (1 or 2).
+        code_size: u8,
+        /// Timing code values in source order.
+        codes: Vec<u16>,
+    },
+    /// DisplayID Tiled Display Topology (Tag 0x28 or Tag 0x12).
+    TiledDisplayTopology {
+        /// Decoded tiled display topology.
+        topology: DisplayIdTiledDisplayTopology,
     },
     /// Embedded CTA data-block collection.
     Cta {
@@ -275,6 +547,13 @@ pub enum ExtensionWriteError {
         /// Typed field name.
         field: &'static str,
     },
+    /// Minimum refresh rate exceeds maximum refresh rate or is zero.
+    InvalidRefreshRateRange {
+        /// Minimum refresh rate in Hz.
+        min_refresh_hz: u8,
+        /// Maximum refresh rate in Hz.
+        max_refresh_hz: u8,
+    },
     /// The complete CTA data-block collection does not fit before byte 127.
     CtaDataBlocksTooLong {
         /// Supplied collection length.
@@ -346,6 +625,43 @@ pub enum ExtensionWriteError {
     InvalidDisplayIdEmbeddedCta {
         /// Underlying CTA parsing error.
         source: ExtensionError,
+    },
+    /// DisplayID Dynamic Video Timing Range has an invalid range (min > max or out of range).
+    InvalidDisplayIdDynamicRange {
+        /// DisplayID data-block tag.
+        tag: u8,
+        /// Detail description of the invalid range constraint.
+        reason: &'static str,
+    },
+    /// A DisplayID interface feature field is out of its representable range.
+    InvalidDisplayIdFeatureField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u8,
+        /// Maximum representable value.
+        maximum: u8,
+    },
+    /// A DisplayID product-identification field is out of its representable range.
+    InvalidDisplayIdProductField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u32,
+        /// Maximum representable value.
+        maximum: u32,
+    },
+    /// A DisplayID data-block layout cannot be re-read while re-ordering.
+    InvalidDisplayIdLayout {
+        /// Underlying read error.
+        source: ExtensionError,
+    },
+    /// An HDR dynamic metadata entry cannot be represented.
+    InvalidHdrDynamicMetadataEntry {
+        /// Zero-based entry index.
+        index: usize,
+        /// Reason the entry is not representable.
+        reason: &'static str,
     },
     /// The CTA extension has a malformed data-block collection or DTD layout.
     InvalidCtaLayout {
@@ -430,6 +746,13 @@ impl std::fmt::Display for ExtensionWriteError {
                 f,
                 "CTA field {field} value {value} exceeds maximum {maximum}"
             ),
+            Self::InvalidRefreshRateRange {
+                min_refresh_hz,
+                max_refresh_hz,
+            } => write!(
+                f,
+                "invalid refresh rate range: {min_refresh_hz} Hz .. {max_refresh_hz} Hz"
+            ),
             Self::CtaDataBlocksTooLong { length, maximum } => write!(
                 f,
                 "CTA data-block collection length {length} exceeds the {maximum}-byte maximum"
@@ -476,6 +799,33 @@ impl std::fmt::Display for ExtensionWriteError {
                     "DisplayID tag 0x{tag:02X} is not supported by this typed encoder"
                 )
             }
+            Self::InvalidDisplayIdDynamicRange { tag, reason } => write!(
+                f,
+                "DisplayID dynamic range data block 0x{tag:02X} has invalid range: {reason}"
+            ),
+            Self::InvalidDisplayIdFeatureField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID interface feature field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidDisplayIdProductField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID product-identification field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidDisplayIdLayout { source } => {
+                write!(f, "DisplayID data-block layout is invalid: {source}")
+            }
+            Self::InvalidHdrDynamicMetadataEntry { index, reason } => write!(
+                f,
+                "CTA HDR dynamic metadata entry {index} is invalid: {reason}"
+            ),
             Self::InvalidCtaLayout { source } => {
                 write!(f, "CTA extension layout is invalid: {source}")
             }
@@ -523,7 +873,7 @@ impl DisplayIdDataBlock {
     pub fn view(&self) -> Result<DisplayIdDataBlockView, ExtensionError> {
         match self.tag {
             0x00 | 0x20 => Ok(DisplayIdDataBlockView::ProductIdentification {
-                raw: self.payload.clone(),
+                product: decode_product_identification(self)?,
             }),
             0x01 | 0x21 => Ok(DisplayIdDataBlockView::DisplayParameters {
                 parameters: decode_display_parameters(self)?,
@@ -533,6 +883,23 @@ impl DisplayIdDataBlock {
             }),
             0x22 => Ok(DisplayIdDataBlockView::DetailedTiming {
                 timings: decode_detailed_timings(self, false)?,
+            }),
+            0x0F | 0x26 => Ok(DisplayIdDataBlockView::InterfaceFeatures {
+                features: decode_interface_features(self)?,
+            }),
+            0x09 | 0x25 => Ok(DisplayIdDataBlockView::DynamicVideoTimingRange {
+                range: decode_dynamic_video_timing_range(self)?,
+            }),
+            0x23 => Ok(DisplayIdDataBlockView::EnumeratedTiming {
+                code_type: (self.revision & 0xC0) >> 6,
+                code_size: if self.revision & 0x08 != 0 { 2 } else { 1 },
+                codes: decode_enumerated_timing_codes(self)?,
+            }),
+            0x24 => Ok(DisplayIdDataBlockView::FormulaTiming {
+                timings: decode_formula_timings(self)?,
+            }),
+            0x12 | 0x28 => Ok(DisplayIdDataBlockView::TiledDisplayTopology {
+                topology: decode_tiled_display_topology(self)?,
             }),
             0x81 => {
                 let raw = self.payload.clone();
@@ -568,6 +935,11 @@ impl DisplayIdDataBlockView {
                     0x22
                 }
             }
+            Self::InterfaceFeatures { .. } => 0x26,
+            Self::FormulaTiming { .. } => 0x24,
+            Self::EnumeratedTiming { .. } => 0x23,
+            Self::DynamicVideoTimingRange { .. } => 0x25,
+            Self::TiledDisplayTopology { .. } => 0x28,
             Self::Cta { .. } => 0x81,
             Self::Unknown { tag, .. } => *tag,
         };
@@ -580,12 +952,34 @@ impl DisplayIdDataBlockView {
         tag: u8,
     ) -> Result<DisplayIdDataBlock, ExtensionWriteError> {
         match self {
-            Self::ProductIdentification { raw } if matches!(tag, 0x00 | 0x20) => {
-                check_display_id_payload_length(raw.len())?;
+            Self::ProductIdentification { product } if matches!(tag, 0x00 | 0x20) => {
+                if !(2000..=2255).contains(&product.year) {
+                    return Err(ExtensionWriteError::InvalidDisplayIdProductField {
+                        field: "year",
+                        value: product.year as u32,
+                        maximum: 2255,
+                    });
+                }
+                if product.product_name.len() > u8::MAX as usize {
+                    return Err(ExtensionWriteError::InvalidDisplayIdProductField {
+                        field: "product_name",
+                        value: product.product_name.len() as u32,
+                        maximum: u8::MAX as u32,
+                    });
+                }
+                let mut payload = Vec::with_capacity(12 + product.product_name.len());
+                payload.extend_from_slice(&product.vendor_id);
+                payload.extend_from_slice(&product.product_code.to_le_bytes());
+                payload.extend_from_slice(&product.serial_number.to_le_bytes());
+                payload.push(product.week_of_manufacture);
+                payload.push((product.year - 2000) as u8);
+                payload.push(product.product_name.len() as u8);
+                payload.extend_from_slice(&product.product_name);
+                check_display_id_payload_length(payload.len())?;
                 Ok(DisplayIdDataBlock {
                     tag,
                     revision: 0,
-                    payload: raw.clone(),
+                    payload,
                 })
             }
             Self::DisplayParameters { parameters } if matches!(tag, 0x01 | 0x21) => {
@@ -670,6 +1064,227 @@ impl DisplayIdDataBlockView {
                     tag,
                     revision: 0,
                     payload: payload.clone(),
+                })
+            }
+            Self::InterfaceFeatures { features } if matches!(tag, 0x0F | 0x26) => {
+                if features.additional_colorspace_count > 7 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                        field: "additional_colorspace_count",
+                        value: features.additional_colorspace_count,
+                        maximum: 7,
+                    });
+                }
+                let mut payload = if features.raw.len() >= 9 {
+                    features.raw.clone()
+                } else {
+                    vec![0u8; 9]
+                };
+                check_display_id_payload_length(payload.len())?;
+                payload[0] = features.color_depth_rgb;
+                payload[1] = features.color_depth_ycbcr444;
+                payload[2] = features.color_depth_ycbcr422;
+                payload[3] = features.color_depth_ycbcr420;
+                payload[4] = features.min_ycbcr420_pixel_rate;
+                payload[5] = features.audio_flags;
+                payload[6] = features.colorspace_eotf_1;
+                payload[7] = features.colorspace_eotf_2;
+                payload[8] = features.additional_colorspace_count;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::TiledDisplayTopology { topology } if matches!(tag, 0x12 | 0x28) => {
+                if topology.tiles_h == 0
+                    || topology.tiles_v == 0
+                    || topology.tile_location_h >= topology.tiles_h
+                    || topology.tile_location_v >= topology.tiles_v
+                    || topology.tile_width == 0
+                    || topology.tile_height == 0
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "tile count, location, or size is invalid",
+                    });
+                }
+                if !topology.has_bevel_info() && topology.pixel_multiplier != 0 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "bevel multiplier set without bevel info",
+                    });
+                }
+                if topology.tiles_h > 64
+                    || topology.tiles_v > 64
+                    || topology.tile_location_h >= 64
+                    || topology.tile_location_v >= 64
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "tile count or location exceeds 6-bit field",
+                    });
+                }
+                let mut payload = topology.raw.clone();
+                if payload.len() < 22 {
+                    payload.resize(22, 0);
+                }
+                check_display_id_payload_length(payload.len())?;
+                let num_h_stored = topology.tiles_h - 1;
+                let num_v_stored = topology.tiles_v - 1;
+                payload[0] = topology.caps;
+                payload[1] = ((num_h_stored & 0x0F) << 4) | (num_v_stored & 0x0F);
+                payload[2] =
+                    ((topology.tile_location_h & 0x0F) << 4) | (topology.tile_location_v & 0x0F);
+                payload[3] = ((num_h_stored >> 4) & 0x03) << 6
+                    | ((num_v_stored >> 4) & 0x03) << 4
+                    | ((topology.tile_location_h >> 4) & 0x03) << 2
+                    | ((topology.tile_location_v >> 4) & 0x03);
+                payload[4..6].copy_from_slice(&(topology.tile_width - 1).to_le_bytes());
+                payload[6..8].copy_from_slice(&(topology.tile_height - 1).to_le_bytes());
+                payload[8] = topology.pixel_multiplier;
+                if topology.has_bevel_info() {
+                    payload[9] = topology.bevel_top.unwrap_or(0);
+                    payload[10] = topology.bevel_bottom.unwrap_or(0);
+                    payload[11] = topology.bevel_right.unwrap_or(0);
+                    payload[12] = topology.bevel_left.unwrap_or(0);
+                }
+                payload[13..16].copy_from_slice(&topology.vendor_id);
+                payload[16..18].copy_from_slice(&topology.product_code.to_le_bytes());
+                payload[18..22].copy_from_slice(&topology.serial_number.to_le_bytes());
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::EnumeratedTiming {
+                code_type,
+                code_size,
+                codes,
+            } if tag == 0x23 => {
+                if *code_type > 2 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                        field: "code_type",
+                        value: *code_type,
+                        maximum: 2,
+                    });
+                }
+                if *code_size != 1 && *code_size != 2 {
+                    return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                        field: "code_size",
+                        value: *code_size,
+                        maximum: 2,
+                    });
+                }
+                let mut payload = Vec::with_capacity(codes.len() * (*code_size as usize));
+                for &code in codes {
+                    if code_size == &2 {
+                        payload.extend_from_slice(&code.to_le_bytes());
+                    } else {
+                        if code > u8::MAX as u16 {
+                            return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                                field: "code",
+                                value: code as u8,
+                                maximum: u8::MAX,
+                            });
+                        }
+                        payload.push(code as u8);
+                    }
+                }
+                check_display_id_payload_length(payload.len())?;
+                let revision = (*code_type << 6) | if *code_size == 2 { 0x08 } else { 0 };
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision,
+                    payload,
+                })
+            }
+            Self::FormulaTiming { timings } if tag == 0x24 => {
+                if timings.is_empty() {
+                    return Err(ExtensionWriteError::DisplayIdPayloadTooShort {
+                        tag,
+                        length: 0,
+                        minimum: 6,
+                    });
+                }
+                let mut payload = Vec::with_capacity(timings.len() * 6);
+                for (index, timing) in timings.iter().enumerate() {
+                    if timing.h_active == 0
+                        || timing.v_active == 0
+                        || timing.v_refresh_hz == 0
+                        || timing.v_refresh_hz > 256
+                    {
+                        return Err(ExtensionWriteError::InvalidDisplayIdTimingField {
+                            tag,
+                            index,
+                            field: "formula_timing",
+                            value: timing.h_active as u32,
+                            maximum: 65_536,
+                        });
+                    }
+                    if timing.stereo_3d > 3 {
+                        return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
+                            field: "stereo_3d",
+                            value: timing.stereo_3d,
+                            maximum: 3,
+                        });
+                    }
+                    let options = (timing.stereo_3d << 5)
+                        | (u8::from(timing.ntsc_refresh) << 4)
+                        | (timing.formula & 0x07);
+                    payload.push(options);
+                    payload.extend_from_slice(&(timing.h_active - 1).to_le_bytes());
+                    payload.extend_from_slice(&(timing.v_active - 1).to_le_bytes());
+                    payload.push((timing.v_refresh_hz - 1) as u8);
+                }
+                check_display_id_payload_length(payload.len())?;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::DynamicVideoTimingRange { range } if matches!(tag, 0x09 | 0x25) => {
+                const MAX_PIXEL_KHZ: u32 = 0x0100_0000;
+                if !(1..=MAX_PIXEL_KHZ).contains(&range.min_pixel_clock_khz)
+                    || !(1..=MAX_PIXEL_KHZ).contains(&range.max_pixel_clock_khz)
+                    || range.min_pixel_clock_khz > range.max_pixel_clock_khz
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "pixel clock out of range or min exceeds max",
+                    });
+                }
+                if range.min_vfreq_hz == 0
+                    || range.max_vfreq_hz == 0
+                    || range.max_vfreq_hz > 1023
+                    || u16::from(range.min_vfreq_hz) > range.max_vfreq_hz
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "refresh rate out of range or min exceeds max",
+                    });
+                }
+                let mut payload = if range.raw.len() >= 9 {
+                    range.raw.clone()
+                } else {
+                    vec![0u8; 9]
+                };
+                check_display_id_payload_length(payload.len())?;
+                let min_clock = (range.min_pixel_clock_khz - 1).to_le_bytes();
+                payload[0..3].copy_from_slice(&min_clock[..3]);
+                let max_clock = (range.max_pixel_clock_khz - 1).to_le_bytes();
+                payload[3..6].copy_from_slice(&max_clock[..3]);
+                payload[6] = range.min_vfreq_hz;
+                payload[7] = (range.max_vfreq_hz & 0xFF) as u8;
+                let flags_base = payload[8] & 0x7C;
+                let seamless_bit = u8::from(range.seamless_dynamic_video_timing) << 7;
+                let upper_vfreq = ((range.max_vfreq_hz >> 8) & 0x03) as u8;
+                payload[8] = flags_base | seamless_bit | upper_vfreq;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
                 })
             }
             _ => Err(ExtensionWriteError::InvalidDisplayIdTag { tag }),
@@ -812,6 +1427,234 @@ fn decode_display_parameters(
     })
 }
 
+fn decode_dynamic_video_timing_range(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdDynamicVideoTimingRange, ExtensionError> {
+    if block.payload.len() < 9 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 9,
+            multiple: 0,
+        });
+    }
+    let bytes = &block.payload;
+    let min_pixel_clock_khz = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) + 1;
+    let max_pixel_clock_khz = u32::from_le_bytes([bytes[3], bytes[4], bytes[5], 0]) + 1;
+    let min_vfreq_hz = bytes[6];
+    let max_vfreq_lower = bytes[7];
+    let flags = bytes[8];
+    let max_vfreq_upper = (flags & 0x03) as u16;
+    let max_vfreq_hz = (max_vfreq_upper << 8) | u16::from(max_vfreq_lower);
+    let seamless_dynamic_video_timing = (flags & 0x80) != 0;
+
+    if min_pixel_clock_khz > max_pixel_clock_khz {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "min pixel clock exceeds max pixel clock",
+        });
+    }
+    if min_vfreq_hz == 0 || max_vfreq_hz == 0 || u16::from(min_vfreq_hz) > max_vfreq_hz {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "min refresh rate exceeds max refresh rate or is zero",
+        });
+    }
+
+    Ok(DisplayIdDynamicVideoTimingRange {
+        min_pixel_clock_khz,
+        max_pixel_clock_khz,
+        min_vfreq_hz,
+        max_vfreq_hz,
+        seamless_dynamic_video_timing,
+        raw: block.payload.clone(),
+    })
+}
+
+fn decode_interface_features(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdInterfaceFeatures, ExtensionError> {
+    if block.payload.len() < 9 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 9,
+            multiple: 0,
+        });
+    }
+    let bytes = &block.payload;
+    if bytes[8] > 7 {
+        return Err(ExtensionError::InvalidDisplayIdFeatureField {
+            field: "additional_colorspace_count",
+            value: bytes[8],
+            maximum: 7,
+        });
+    }
+    Ok(DisplayIdInterfaceFeatures {
+        color_depth_rgb: bytes[0],
+        color_depth_ycbcr444: bytes[1],
+        color_depth_ycbcr422: bytes[2],
+        color_depth_ycbcr420: bytes[3],
+        min_ycbcr420_pixel_rate: bytes[4],
+        audio_flags: bytes[5],
+        colorspace_eotf_1: bytes[6],
+        colorspace_eotf_2: bytes[7],
+        additional_colorspace_count: bytes[8],
+        raw: bytes.to_vec(),
+    })
+}
+
+fn decode_product_identification(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdProductIdentification, ExtensionError> {
+    if block.payload.len() < 12 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 12,
+            multiple: 0,
+        });
+    }
+    let bytes = &block.payload;
+    let name_len = bytes[11] as usize;
+    if 12 + name_len > bytes.len() {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: bytes.len(),
+            minimum: 12 + name_len,
+            multiple: 0,
+        });
+    }
+    Ok(DisplayIdProductIdentification {
+        vendor_id: [bytes[0], bytes[1], bytes[2]],
+        vendor_id_is_oui: block.tag == 0x20,
+        product_code: u16::from_le_bytes([bytes[3], bytes[4]]),
+        serial_number: u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+        week_of_manufacture: bytes[9],
+        year: 2000 + u16::from(bytes[10]),
+        product_name: bytes[12..12 + name_len].to_vec(),
+        raw: bytes.to_vec(),
+    })
+}
+
+fn decode_tiled_display_topology(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdTiledDisplayTopology, ExtensionError> {
+    if block.payload.len() < 22 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 22,
+            multiple: 0,
+        });
+    }
+    let b = &block.payload;
+    let caps = b[0];
+    let num_v_stored = (b[1] & 0x0F) | ((b[3] & 0x30) >> 4);
+    let num_h_stored = ((b[1] >> 4) & 0x0F) | ((b[3] & 0xC0) >> 4);
+    let tile_v_location = (b[2] & 0x0F) | ((b[3] & 0x03) << 4);
+    let tile_h_location = ((b[2] >> 4) & 0x0F) | ((b[3] & 0x0C) << 2);
+    let tile_width = u16::from_le_bytes([b[4], b[5]]) + 1;
+    let tile_height = u16::from_le_bytes([b[6], b[7]]) + 1;
+    let pixel_multiplier = b[8];
+    let has_bevel = caps & 0x40 != 0;
+    let (bevel_top, bevel_bottom, bevel_right, bevel_left) = if has_bevel {
+        (Some(b[9]), Some(b[10]), Some(b[11]), Some(b[12]))
+    } else {
+        (None, None, None, None)
+    };
+    let tiles_h = num_h_stored + 1;
+    let tiles_v = num_v_stored + 1;
+    if tile_h_location >= tiles_h || tile_v_location >= tiles_v {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "tile location exceeds tile count",
+        });
+    }
+    if !has_bevel && pixel_multiplier != 0 {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "bevel multiplier set without bevel info",
+        });
+    }
+    Ok(DisplayIdTiledDisplayTopology {
+        caps,
+        tiles_h,
+        tiles_v,
+        tile_location_h: tile_h_location,
+        tile_location_v: tile_v_location,
+        tile_width,
+        tile_height,
+        pixel_multiplier,
+        bevel_top,
+        bevel_bottom,
+        bevel_right,
+        bevel_left,
+        vendor_id: [b[13], b[14], b[15]],
+        vendor_id_is_oui: block.tag == 0x28,
+        product_code: u16::from_le_bytes([b[16], b[17]]),
+        serial_number: u32::from_le_bytes([b[18], b[19], b[20], b[21]]),
+        raw: b.to_vec(),
+    })
+}
+
+fn decode_formula_timings(
+    block: &DisplayIdDataBlock,
+) -> Result<Vec<DisplayIdFormulaTiming>, ExtensionError> {
+    if block.payload.len() < 6 || !block.payload.len().is_multiple_of(6) {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 6,
+            multiple: 6,
+        });
+    }
+    let mut timings = Vec::with_capacity(block.payload.len() / 6);
+    for bytes in block.payload.as_chunks::<6>().0 {
+        let options = bytes[0];
+        timings.push(DisplayIdFormulaTiming {
+            h_active: u16::from_le_bytes([bytes[1], bytes[2]]) + 1,
+            v_active: u16::from_le_bytes([bytes[3], bytes[4]]) + 1,
+            v_refresh_hz: u16::from(bytes[5]) + 1,
+            formula: options & 0x07,
+            ntsc_refresh: options & 0x10 != 0,
+            stereo_3d: (options >> 5) & 0x03,
+        });
+    }
+    Ok(timings)
+}
+
+fn decode_enumerated_timing_codes(block: &DisplayIdDataBlock) -> Result<Vec<u16>, ExtensionError> {
+    let two_byte = block.revision & 0x08 != 0;
+    let bytes = &block.payload;
+    if bytes.is_empty() {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: 0,
+            minimum: 1,
+            multiple: 0,
+        });
+    }
+    if two_byte {
+        if !bytes.len().is_multiple_of(2) {
+            return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+                tag: block.tag,
+                length: bytes.len(),
+                minimum: 2,
+                multiple: 2,
+            });
+        }
+        Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect())
+    } else {
+        Ok(bytes.iter().map(|&b| u16::from(b)).collect())
+    }
+}
+
 /// Errors returned while reading an extension's structured view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -907,6 +1750,63 @@ pub enum ExtensionError {
         /// Actual payload length.
         length: usize,
     },
+    /// A CTA YCbCr 4:2:0 Capability Map references an SVD index that does not exist in the collection.
+    Y420CapabilityMapIndexOutOfRange {
+        /// SVD index indicated by the capability map (zero-based).
+        index: usize,
+        /// Total number of SVD entries available in regular Video Data Blocks.
+        available_svds: usize,
+    },
+    /// A CTA YCbCr 4:2:0 Capability Map is present but no Video Data Block exists.
+    Y420CapabilityMapMissingVideoDataBlock,
+    /// CTA Adaptive-Sync block has an invalid refresh rate range.
+    InvalidRefreshRateRange {
+        /// Minimum refresh rate in Hz.
+        min_refresh_hz: u8,
+        /// Maximum refresh rate in Hz.
+        max_refresh_hz: u8,
+    },
+    /// DisplayID Dynamic Video Timing Range block has an invalid range (min > max or out of range).
+    InvalidDisplayIdDynamicRange {
+        /// DisplayID data-block tag.
+        tag: u8,
+        /// Detail description of the invalid range constraint.
+        reason: &'static str,
+    },
+    /// A DisplayID interface feature field is out of its representable range.
+    InvalidDisplayIdFeatureField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u8,
+        /// Maximum representable value.
+        maximum: u8,
+    },
+    /// A DisplayID product-identification field is out of its representable range.
+    InvalidDisplayIdProductField {
+        /// Field name.
+        field: &'static str,
+        /// Supplied value.
+        value: u32,
+        /// Maximum representable value.
+        maximum: u32,
+    },
+    /// A CTA HDR dynamic metadata entry has an invalid length (type_len < 2).
+    InvalidDynamicHdrMetadataLength {
+        /// Zero-based entry index.
+        index: usize,
+        /// Declared entry length byte.
+        length: usize,
+    },
+    /// A CTA HDR dynamic metadata entry is truncated relative to the block payload.
+    TruncatedDynamicHdrMetadataEntry {
+        /// Zero-based entry index.
+        index: usize,
+        /// Available bytes.
+        length: usize,
+        /// Minimum required bytes.
+        minimum: usize,
+    },
 }
 
 impl std::fmt::Display for ExtensionError {
@@ -942,6 +1842,38 @@ impl std::fmt::Display for ExtensionError {
             Self::TruncatedDisplayIdDataBlockHeader { offset, available } => write!(
                 f,
                 "DisplayID data-block header at offset {offset} has only {available} bytes"
+            ),
+            Self::InvalidDisplayIdDynamicRange { tag, reason } => write!(
+                f,
+                "DisplayID dynamic range data block 0x{tag:02X} has invalid range: {reason}"
+            ),
+            Self::InvalidDisplayIdFeatureField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID interface feature field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidDisplayIdProductField {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "DisplayID product-identification field {field} value {value} exceeds maximum {maximum}"
+            ),
+            Self::InvalidDynamicHdrMetadataLength { index, length } => write!(
+                f,
+                "CTA HDR dynamic metadata entry {index} has invalid length {length}"
+            ),
+            Self::TruncatedDynamicHdrMetadataEntry {
+                index,
+                length,
+                minimum,
+            } => write!(
+                f,
+                "CTA HDR dynamic metadata entry {index} needs {minimum} bytes but only {length} available"
             ),
             Self::TruncatedDataBlock { offset, length } => write!(
                 f,
@@ -983,6 +1915,23 @@ impl std::fmt::Display for ExtensionError {
             Self::InvalidSpeakerAllocationDataBlockLength { length } => write!(
                 f,
                 "CTA speaker allocation data block has invalid payload length {length}"
+            ),
+            Self::Y420CapabilityMapIndexOutOfRange {
+                index,
+                available_svds,
+            } => write!(
+                f,
+                "CTA Y420 capability map references SVD index {index} but only {available_svds} are available"
+            ),
+            Self::Y420CapabilityMapMissingVideoDataBlock => {
+                f.write_str("CTA Y420 capability map is present without any Video Data Block")
+            }
+            Self::InvalidRefreshRateRange {
+                min_refresh_hz,
+                max_refresh_hz,
+            } => write!(
+                f,
+                "invalid refresh rate range: {min_refresh_hz} Hz .. {max_refresh_hz} Hz"
             ),
         }
     }
@@ -1156,6 +2105,25 @@ impl EdidBlock {
         Ok(())
     }
 
+    /// Re-order DisplayID data blocks according to the ordering policy.
+    ///
+    /// `PreserveSourceOrder` is a no-op that keeps the block bytes unchanged;
+    /// `Canonical` deterministically sorts the data blocks and is idempotent.
+    pub fn reorder_display_id_data_blocks(
+        &mut self,
+        ordering: DisplayIdOrdering,
+    ) -> Result<(), ExtensionWriteError> {
+        if matches!(ordering, DisplayIdOrdering::PreserveSourceOrder) {
+            return Ok(());
+        }
+        let mut blocks = self
+            .display_id_data_blocks()
+            .map_err(|source| ExtensionWriteError::InvalidDisplayIdLayout { source })?;
+        blocks
+            .sort_by(|a, b| (a.tag, a.revision, &a.payload).cmp(&(b.tag, b.revision, &b.payload)));
+        self.replace_display_id_data_blocks(&blocks)
+    }
+
     /// Construct a CTA-861 extension containing only a data-block collection.
     pub fn from_cta_data_blocks(
         revision: u8,
@@ -1198,6 +2166,114 @@ impl EdidBlock {
         parse_display_id_data_blocks(&self.raw[5..5 + header.payload_length], 5)
     }
 
+    /// Read all Dynamic Video Timing Range Limits from DisplayID extension blocks.
+    pub fn display_id_dynamic_video_timing_ranges(
+        &self,
+    ) -> Result<Vec<DisplayIdDynamicVideoTimingRange>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut ranges = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::DynamicVideoTimingRange { range } = block.view()? {
+                ranges.push(range);
+            }
+        }
+        Ok(ranges)
+    }
+
+    /// Read all Display Interface Features from DisplayID extension blocks.
+    pub fn display_id_interface_features(
+        &self,
+    ) -> Result<Vec<DisplayIdInterfaceFeatures>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut features = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::InterfaceFeatures { features: f } = block.view()? {
+                features.push(f);
+            }
+        }
+        Ok(features)
+    }
+
+    /// Read all Product Identification blocks from DisplayID extension blocks.
+    pub fn display_id_product_identifications(
+        &self,
+    ) -> Result<Vec<DisplayIdProductIdentification>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut products = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::ProductIdentification { product } = block.view()? {
+                products.push(product);
+            }
+        }
+        Ok(products)
+    }
+
+    /// Read all Tiled Display Topology blocks from DisplayID extension blocks.
+    pub fn display_id_tiled_topologies(
+        &self,
+    ) -> Result<Vec<DisplayIdTiledDisplayTopology>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut topologies = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::TiledDisplayTopology { topology } = block.view()? {
+                topologies.push(topology);
+            }
+        }
+        Ok(topologies)
+    }
+
+    /// Read all Type IX formula-based timings from DisplayID extension blocks.
+    pub fn display_id_formula_timings(
+        &self,
+    ) -> Result<Vec<DisplayIdFormulaTiming>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut timings = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::FormulaTiming { timings: t } = block.view()? {
+                timings.extend(t);
+            }
+        }
+        Ok(timings)
+    }
+
+    /// Read all Type VIII enumerated timing codes from DisplayID extension blocks.
+    pub fn display_id_enumerated_timings(
+        &self,
+    ) -> Result<Vec<DisplayIdEnumeratedTiming>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut timings = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::EnumeratedTiming {
+                code_type, codes, ..
+            } = block.view()?
+            {
+                timings.extend(
+                    codes
+                        .into_iter()
+                        .map(|code| DisplayIdEnumeratedTiming { code_type, code }),
+                );
+            }
+        }
+        Ok(timings)
+    }
+
+    /// Read detailed timings from this DisplayID extension block.
+    pub fn display_id_detailed_timings(
+        &self,
+    ) -> Result<Vec<DisplayIdDetailedTiming>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut timings = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::DetailedTiming {
+                timings: block_timings,
+            } = block.view()?
+            {
+                timings.extend(block_timings);
+            }
+        }
+        Ok(timings)
+    }
+
     /// Read the CTA-861 data-block collection without modifying the block.
     pub fn cta_data_blocks(&self) -> Result<Vec<CtaDataBlock>, ExtensionError> {
         if self.raw[0] != 0x02 {
@@ -1209,6 +2285,12 @@ impl EdidBlock {
             return Err(ExtensionError::InvalidDtdOffset { offset: end });
         }
         parse_cta_data_blocks(&self.raw[4..end], 4, dtd_offset == 0)
+    }
+
+    /// Query resolved YCbCr 4:2:0 capabilities for this CTA-861 block.
+    pub fn cta_y420_support(&self) -> Result<CtaY420Support, ExtensionError> {
+        let blocks = self.cta_data_blocks()?;
+        CtaY420Support::resolve_from_blocks(&blocks)
     }
 
     /// Read and validate the CTA-861 extension header and capability flags.
@@ -1396,9 +2478,7 @@ fn parse_cta_data_blocks(
     let mut offset = 0;
     while offset < data.len() {
         let header = data[offset];
-        // Only an offset-zero collection has an unknown boundary where a
-        // zero-filled remainder can be treated as padding.
-        if stop_at_zero_padding && header == 0 && data[offset..].iter().all(|&byte| byte == 0) {
+        if header == 0 && stop_at_zero_padding {
             break;
         }
         let tag = header >> 5;
@@ -1423,11 +2503,13 @@ fn parse_cta_data_blocks(
 #[cfg(test)]
 mod tests {
     use super::{
-        CtaAudioDescriptor, CtaColorimetry, CtaDataBlock, CtaDataBlockView,
-        CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability,
-        CtaVideoMode, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
-        DisplayIdDisplayParameters, DisplayIdHeader, ExtensionError, ExtensionKind,
-        ExtensionWriteError,
+        CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
+        CtaDataBlockView, CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock,
+        CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdDataBlock,
+        DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
+        DisplayIdDynamicVideoTimingRange, DisplayIdFormulaTiming, DisplayIdHeader,
+        DisplayIdInterfaceFeatures, DisplayIdProductIdentification, DisplayIdTiledDisplayTopology,
+        ExtensionError, ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -1540,14 +2622,822 @@ mod tests {
 
         let adaptive_sync = CtaDataBlock {
             tag: 7,
-            payload: vec![0x1A, 0x01, 0x02],
+            payload: vec![0x1A, 0x01, 48, 144],
         };
         assert_eq!(
             adaptive_sync.view().unwrap(),
-            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync {
-                raw: vec![0x1A, 0x01, 0x02],
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                flags: 0x01,
+                min_refresh_hz: 48,
+                max_refresh_hz: 144,
+                raw: vec![0x1A, 0x01, 48, 144],
+            }))
+        );
+    }
+
+    #[test]
+    fn cta_adaptive_sync_roundtrip_modification_and_boundary_rejection() {
+        // Parse valid block with extra tail bytes
+        let block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x05, 48, 144, 0xDE, 0xAD],
+        };
+        let view = block.view().unwrap();
+        let CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(mut sync)) = view
+        else {
+            panic!("expected AdaptiveSync view");
+        };
+        assert_eq!(sync.flags, 0x05);
+        assert_eq!(sync.min_refresh_hz, 48);
+        assert_eq!(sync.max_refresh_hz, 144);
+        assert_eq!(sync.raw, vec![0x1A, 0x05, 48, 144, 0xDE, 0xAD]);
+
+        // Unmodified round-trip preserves raw tail
+        let encoded =
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(sync.clone()))
+                .to_data_block()
+                .unwrap();
+        assert_eq!(encoded, block);
+
+        // Modifying fields updates payload while preserving tail
+        sync.min_refresh_hz = 60;
+        sync.max_refresh_hz = 240;
+        sync.flags = 0x07;
+        let modified_block =
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(sync.clone()))
+                .to_data_block()
+                .unwrap();
+        assert_eq!(
+            modified_block.payload,
+            vec![0x1A, 0x07, 60, 240, 0xDE, 0xAD]
+        );
+
+        // Constructor creates valid block
+        let created = CtaAdaptiveSync::new(1, 255, 0x01).unwrap();
+        assert_eq!(created.min_refresh_hz, 1);
+        assert_eq!(created.max_refresh_hz, 255);
+        assert_eq!(created.raw, vec![0x1A, 0x01, 1, 255]);
+
+        // Constructor rejects reverse range and zero
+        assert!(matches!(
+            CtaAdaptiveSync::new(144, 48, 0),
+            Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz: 144,
+                max_refresh_hz: 48
+            })
+        ));
+        assert!(matches!(
+            CtaAdaptiveSync::new(0, 144, 0),
+            Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz: 0,
+                max_refresh_hz: 144
+            })
+        ));
+
+        // Parser rejects reverse range, zero, and truncated payloads
+        let reverse_block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x01, 144, 48],
+        };
+        assert!(matches!(
+            reverse_block.view(),
+            Err(ExtensionError::InvalidRefreshRateRange {
+                min_refresh_hz: 144,
+                max_refresh_hz: 48
+            })
+        ));
+        let zero_block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x01, 0, 144],
+        };
+        assert!(matches!(
+            zero_block.view(),
+            Err(ExtensionError::InvalidRefreshRateRange {
+                min_refresh_hz: 0,
+                max_refresh_hz: 144
+            })
+        ));
+        let truncated_block = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x1A, 0x01, 48],
+        };
+        assert!(matches!(
+            truncated_block.view(),
+            Err(ExtensionError::TruncatedExtendedDataBlock {
+                extended_tag: 0x1A,
+                length: 3,
+                minimum: 4
+            })
+        ));
+    }
+    #[test]
+    fn cta_audio_descriptor_semantic_accessors_and_roundtrip() {
+        // LPCM: 2 channels, 48/44.1/32 kHz, 24/20/16-bit.
+        let lpcm = CtaAudioDescriptor {
+            format: 1,
+            channels: 2,
+            sample_rates: 0b000_0111,
+            format_specific: 0b111,
+        };
+        assert_eq!(lpcm.format_kind(), CtaAudioFormat::Lpcm);
+        assert!(lpcm.supports_sample_rate(48));
+        assert!(lpcm.supports_sample_rate(44));
+        assert!(lpcm.supports_sample_rate(32));
+        assert!(!lpcm.supports_sample_rate(192));
+        assert!(lpcm.lpcm_supports_sample_size(16));
+        assert!(lpcm.lpcm_supports_sample_size(20));
+        assert!(lpcm.lpcm_supports_sample_size(24));
+        assert_eq!(lpcm.lpcm_sample_size_bits(), &[16, 20, 24]);
+
+        // A descriptor supporting only 16+20-bit must not report 24-bit.
+        let partial = CtaAudioDescriptor {
+            format: 1,
+            channels: 2,
+            sample_rates: 0b000_0111,
+            format_specific: 0b011,
+        };
+        assert_eq!(partial.lpcm_sample_size_bits(), &[16, 20]);
+        assert!(partial.lpcm_supports_sample_size(16));
+        assert!(partial.lpcm_supports_sample_size(20));
+        assert!(!partial.lpcm_supports_sample_size(24));
+        assert_eq!(lpcm.channels, 2);
+
+        // Compressed format: AC-3 has no LPCM sample size.
+        let ac3 = CtaAudioDescriptor {
+            format: 2,
+            channels: 6,
+            sample_rates: 0b000_0111,
+            format_specific: 0x40,
+        };
+        assert_eq!(ac3.format_kind(), CtaAudioFormat::Ac3);
+        assert_eq!(ac3.lpcm_sample_size_bits(), &[]);
+        assert!(!ac3.lpcm_supports_sample_size(16));
+
+        // Extended format (format code 15) maps to Extended.
+        let ext = CtaAudioDescriptor {
+            format: 15,
+            channels: 8,
+            sample_rates: 0,
+            format_specific: 0xD8,
+        };
+        assert_eq!(ext.format_kind(), CtaAudioFormat::Extended);
+
+        // Unknown format code maps to Reserved.
+        let unknown = CtaAudioDescriptor {
+            format: 0,
+            channels: 2,
+            sample_rates: 0,
+            format_specific: 0,
+        };
+        assert_eq!(unknown.format_kind(), CtaAudioFormat::Reserved);
+
+        // Round-trip a mixed audio list (LPCM + compressed + unknown) preserves bytes.
+        let block = CtaDataBlock {
+            tag: 1,
+            payload: vec![
+                (1 << 3) | (2 - 1),
+                0b000_0111,
+                0b111, // LPCM
+                (2 << 3) | (6 - 1),
+                0b000_0111,
+                0x40, // AC-3
+                (7 << 3) | (5 - 1),
+                0b000_0111,
+                0x2A, // DTS
+            ],
+        };
+        let view = block.view().unwrap();
+        let CtaDataBlockView::Audio { descriptors } = &view else {
+            panic!("expected Audio view");
+        };
+        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors[0].format_kind(), CtaAudioFormat::Lpcm);
+        assert_eq!(descriptors[1].format_kind(), CtaAudioFormat::Ac3);
+        assert_eq!(descriptors[2].format_kind(), CtaAudioFormat::Dts);
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // A reserved format code is rejected by the checked writer.
+        let reserved = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 0,
+                channels: 2,
+                sample_rates: 0,
+                format_specific: 0,
+            }],
+        };
+        assert!(matches!(
+            reserved.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioFormat {
+                index: 0,
+                format: 0
+            })
+        ));
+
+        // Reject channel count outside 1..=8.
+        let bad_channels = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 1,
+                channels: 9,
+                sample_rates: 0,
+                format_specific: 0,
+            }],
+        };
+        assert!(matches!(
+            bad_channels.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioChannels {
+                index: 0,
+                channels: 9
+            })
+        ));
+
+        // Reject format code outside 1..=15.
+        let bad_format = CtaDataBlockView::Audio {
+            descriptors: vec![CtaAudioDescriptor {
+                format: 16,
+                channels: 2,
+                sample_rates: 0,
+                format_specific: 0,
+            }],
+        };
+        assert!(matches!(
+            bad_format.to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaAudioFormat {
+                index: 0,
+                format: 16
+            })
+        ));
+    }
+
+    #[test]
+    fn cta_y420_video_and_capability_map_roundtrip_and_query() {
+        let vdb = CtaDataBlock {
+            tag: 2,
+            payload: vec![16, 97, 107], // SVD 0: VIC 16, SVD 1: VIC 97, SVD 2: VIC 107
+        };
+        let y420_vdb = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x0E, 96], // VIC 96 (4:2:0 only)
+        };
+        let y420_cmdb = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x0F, 0b0000_0010], // SVD 1 (VIC 97) is 4:2:0 capable
+        };
+
+        // Verify views
+        let y420_vdb_view = y420_vdb.view().unwrap();
+        assert_eq!(
+            y420_vdb_view,
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420Video {
+                modes: vec![CtaVideoMode {
+                    vic: 96,
+                    native: false
+                }]
             })
         );
+        assert_eq!(y420_vdb_view.to_data_block().unwrap(), y420_vdb);
+
+        let y420_cmdb_view = y420_cmdb.view().unwrap();
+        assert_eq!(
+            y420_cmdb_view,
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420CapabilityMap {
+                raw: vec![0x0F, 0b0000_0010],
+            })
+        );
+        assert_eq!(y420_cmdb_view.to_data_block().unwrap(), y420_cmdb);
+
+        // Test resolution
+        let blocks = vec![vdb.clone(), y420_vdb.clone(), y420_cmdb.clone()];
+        let support = CtaY420Support::resolve_from_blocks(&blocks).unwrap();
+        assert!(!support.supports_vic(16));
+        assert!(support.supports_vic(97));
+        assert!(!support.is_420_only(97));
+        assert!(support.supports_vic(96));
+        assert!(support.is_420_only(96));
+        assert_eq!(support.all_420_vics(), vec![97, 96]);
+
+        // Test out of range error
+        let invalid_cmdb = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x0F, 0b0001_0000], // SVD 4 (out of range, only 3 exist)
+        };
+        let err_blocks = vec![vdb.clone(), invalid_cmdb];
+        assert!(matches!(
+            CtaY420Support::resolve_from_blocks(&err_blocks),
+            Err(ExtensionError::Y420CapabilityMapIndexOutOfRange {
+                index: 4,
+                available_svds: 3
+            })
+        ));
+
+        // Test missing VDB error
+        let no_vdb_blocks = vec![y420_cmdb];
+        assert!(matches!(
+            CtaY420Support::resolve_from_blocks(&no_vdb_blocks),
+            Err(ExtensionError::Y420CapabilityMapMissingVideoDataBlock)
+        ));
+    }
+
+    #[test]
+    fn display_id_dynamic_video_timing_range_roundtrip_query_and_rejection() {
+        // 1. Decode valid Tag 0x25 block (451,310 kHz, 48-165 Hz, seamless = true)
+        // 451,310 kHz -> minus 1 is 451,309 = 0x06E2ED -> bytes [0xED, 0xE2, 0x06]
+        // 48 Hz min -> 0x30
+        // 165 Hz max -> 165 = 0x00A5 -> lower 0xA5, upper 0x00
+        // seamless flag -> bit 7 = 0x80
+        let payload = vec![
+            0xED, 0xE2, 0x06, // min pixel clock (451,310 kHz)
+            0xED, 0xE2, 0x06, // max pixel clock (451,310 kHz)
+            48,   // min vfreq
+            165,  // max vfreq lower
+            0x80, // seamless flag
+        ];
+        let block = DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::DynamicVideoTimingRange { range } = &view else {
+            panic!("expected DynamicVideoTimingRange view");
+        };
+        assert_eq!(range.min_pixel_clock_khz, 451_310);
+        assert_eq!(range.max_pixel_clock_khz, 451_310);
+        assert_eq!(range.min_vfreq_hz, 48);
+        assert_eq!(range.max_vfreq_hz, 165);
+        assert!(range.seamless_dynamic_video_timing);
+        assert_eq!(range.raw, payload);
+
+        // Lossless round-trip
+        let encoded = view.to_data_block().unwrap();
+        assert_eq!(encoded, block);
+
+        // Query from EdidBlock
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let ranges = edid_block.display_id_dynamic_video_timing_ranges().unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].min_vfreq_hz, 48);
+        assert_eq!(ranges[0].max_vfreq_hz, 165);
+        // Mutation test
+        let mut modified_range: DisplayIdDynamicVideoTimingRange = range.clone();
+        modified_range.max_vfreq_hz = 240;
+        modified_range.seamless_dynamic_video_timing = false;
+        let modified_view = DisplayIdDataBlockView::DynamicVideoTimingRange {
+            range: modified_range,
+        };
+        let modified_block = modified_view.to_data_block().unwrap();
+        assert_eq!(modified_block.payload[7], 240);
+        assert_eq!(modified_block.payload[8], 0x00);
+
+        // Rejection tests: min clock > max clock
+        let invalid_clock = DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xFF, 0xE2, 0x06, 0x00, 0xE2, 0x06, 48, 165, 0x80],
+        };
+        assert!(matches!(
+            invalid_clock.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+
+        // Rejection tests: min vfreq > max vfreq
+        let invalid_vfreq = DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 165, 48, 0x80],
+        };
+        assert!(matches!(
+            invalid_vfreq.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+    }
+
+    #[test]
+    fn display_id_tiled_topology_roundtrip_geometry_and_rejection() {
+        // Tag 0x28, 22-byte payload. 2x2 grid, tile at (1,0) (0-based), 1920x1080 tile,
+        // vendor OUI, product 0x1234, serial 0xDEADBEEF.
+        let payload = vec![
+            0x00, // caps (multiple enclosures, no bevel)
+            0x11, // num_h stored low nibble 1(->2), num_v stored low nibble 1(->2)
+            0x10, // tile_h location high nibble 1, tile_v location low nibble 0
+            0x00, // high bits all zero
+            0x7F, 0x07, // width stored 1919 (0x077F) => 1920
+            0x37, 0x04, // height stored 1079 => 1080
+            0x00, // pixel multiplier
+            0, 0, 0, 0, // bevels (not present, caps&0x40=0)
+            0x03, 0x0C, 0x00, // vendor OUI
+            0x34, 0x12, // product 0x1234
+            0xEF, 0xBE, 0xAD, 0xDE, // serial 0xDEADBEEF
+        ];
+        assert_eq!(payload.len(), 22);
+        let block = DisplayIdDataBlock {
+            tag: 0x28,
+            revision: 0,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::TiledDisplayTopology { topology } = &view else {
+            panic!("expected TiledDisplayTopology view");
+        };
+        let topology: &DisplayIdTiledDisplayTopology = topology;
+        assert_eq!(topology.tiles_h, 2);
+        assert_eq!(topology.tiles_v, 2);
+        assert_eq!(topology.tile_location_h, 1);
+        assert_eq!(topology.tile_location_v, 0);
+        assert_eq!(topology.tile_width, 1920);
+        assert_eq!(topology.tile_height, 1080);
+        assert!(topology.vendor_id_is_oui);
+        assert_eq!(topology.vendor_id, [0x03, 0x0C, 0x00]);
+        assert_eq!(topology.product_code, 0x1234);
+        assert_eq!(topology.serial_number, 0xDEADBEEF);
+        assert!(!topology.has_bevel_info());
+        assert!(!topology.single_enclosure());
+
+        // Lossless round-trip.
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // Query from EdidBlock.
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let topologies = edid_block.display_id_tiled_topologies().unwrap();
+        assert_eq!(topologies.len(), 1);
+        assert_eq!(topologies[0].tile_location_h, 1);
+
+        // Rejection: tile location >= tile count.
+        let bad_location = DisplayIdDataBlock {
+            tag: 0x28,
+            revision: 0,
+            payload: {
+                let mut p2 = payload.clone();
+                p2[2] = 0x20; // tile_h location 2 (but 2 tiles)
+                p2
+            },
+        };
+        assert!(matches!(
+            bad_location.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+
+        // Rejection: bevel multiplier set without bevel info.
+        let bad_bevel = DisplayIdDataBlock {
+            tag: 0x28,
+            revision: 0,
+            payload: {
+                let mut p2 = payload.clone();
+                p2[8] = 1; // pixel multiplier set, but caps&0x40=0
+                p2
+            },
+        };
+        assert!(matches!(
+            bad_bevel.view(),
+            Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
+        ));
+    }
+
+    #[test]
+    fn display_id_formula_and_enumerated_timing_roundtrip() {
+        // Type IX formula timing (tag 0x24): 2 descriptors.
+        let formula_payload = vec![
+            0x02 | 0x10,
+            0x7F,
+            0x07,
+            0x37,
+            0x04,
+            59, // CVT-RB, NTSC, 1920x1080 @60
+            0x01 << 5,
+            0xFF,
+            0x0F,
+            0x82,
+            0x08,
+            119, // CVT, 3D stereo, 3840x2160 @120
+        ];
+        let block = DisplayIdDataBlock {
+            tag: 0x24,
+            revision: 0,
+            payload: formula_payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::FormulaTiming { timings } = &view else {
+            panic!("expected FormulaTiming view");
+        };
+        assert_eq!(timings.len(), 2);
+        assert_eq!(timings[0].h_active, 1920);
+        assert_eq!(timings[0].v_active, 1080);
+        assert_eq!(timings[0].v_refresh_hz, 60);
+        assert_eq!(timings[0].formula, 2);
+        assert!(timings[0].ntsc_refresh);
+        assert_eq!(timings[0].stereo_3d, 0);
+        assert_eq!(timings[1].stereo_3d, 1);
+        assert_eq!(timings[1].v_refresh_hz, 120);
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // Type VIII enumerated timing (tag 0x23): 1-byte codes, CTA VIC (type 1).
+        let enum_payload = vec![16, 97, 107];
+        let enum_block = DisplayIdDataBlock {
+            tag: 0x23,
+            revision: 1 << 6,
+            payload: enum_payload.clone(),
+        };
+        let enum_view = enum_block.view().unwrap();
+        let DisplayIdDataBlockView::EnumeratedTiming {
+            code_type,
+            code_size,
+            codes,
+        } = &enum_view
+        else {
+            panic!("expected EnumeratedTiming view");
+        };
+        assert_eq!(*code_type, 1);
+        assert_eq!(*code_size, 1);
+        assert_eq!(*codes, vec![16, 97, 107]);
+        assert_eq!(enum_view.to_data_block().unwrap(), enum_block);
+
+        // Query from EdidBlock.
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let formulas = edid_block.display_id_formula_timings().unwrap();
+        assert_eq!(formulas.len(), 2);
+        assert_eq!(formulas[0].h_active, 1920);
+        let enum_edid =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&enum_block))
+                .unwrap();
+        let enum_timings = enum_edid.display_id_enumerated_timings().unwrap();
+        assert_eq!(enum_timings.len(), 3);
+        assert_eq!(enum_timings[0].code_type, 1);
+        assert_eq!(enum_timings[0].code, 16);
+
+        // Rejection: formula timing with zero active region.
+        let bad_formula = DisplayIdDataBlockView::FormulaTiming {
+            timings: vec![DisplayIdFormulaTiming {
+                h_active: 0,
+                v_active: 1080,
+                v_refresh_hz: 60,
+                formula: 0,
+                ntsc_refresh: false,
+                stereo_3d: 0,
+            }],
+        };
+        assert!(matches!(
+            bad_formula.to_data_block_with_tag(0x24),
+            Err(ExtensionWriteError::InvalidDisplayIdTimingField { .. })
+        ));
+    }
+
+    #[test]
+    fn cta_dynamic_hdr_metadata_roundtrip_and_rejection() {
+        // Build an HDR Dynamic Metadata block: a versioned type 1, an SL-HDR type 2,
+        // and an unknown type. Each entry is [type_len][type_lo][type_hi][data...].
+        let payload = vec![
+            0x07, // entry 1: type 1, type_len 3 => [3, 1,0, 0x13]
+            3, 0x01, 0x00, 0x13, // entry 2: type 2, type_len 4 => [4, 2,0, 0x52, 0x00]
+            4, 0x02, 0x00, 0x52, 0x00,
+            // entry 3: unknown type 0xCDAB, type_len 4 => [4, 0xAB,0xCD, 0xDE,0xAD]
+            4, 0xAB, 0xCD, 0xDE, 0xAD,
+        ];
+        let block = CtaDataBlock {
+            tag: 7,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let CtaDataBlockView::Extended(CtaExtendedDataBlockView::HdrDynamicMetadata {
+            entries,
+            raw,
+        }) = &view
+        else {
+            panic!("expected HdrDynamicMetadata view");
+        };
+        assert_eq!(raw, &payload);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].metadata_type, 1);
+        assert_eq!(entries[0].version(), Some(3));
+        assert!(!entries[0].sl_hdr1());
+        assert_eq!(entries[1].metadata_type, 2);
+        assert_eq!(entries[1].version(), Some(2));
+        assert!(entries[1].sl_hdr1());
+        assert!(!entries[1].sl_hdr2());
+        assert!(entries[1].sl_hdr3());
+        assert_eq!(entries[2].metadata_type, 0xCDAB);
+        assert_eq!(entries[2].version(), None);
+        assert_eq!(entries[2].data, vec![0xDE, 0xAD]);
+
+        // Lossless round-trip.
+        assert_eq!(view.to_data_block().unwrap(), block);
+
+        // Rejection: truncated entry (declared length exceeds payload).
+        let truncated = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x07, 10, 0x01, 0x00, 0x11],
+        };
+        assert!(matches!(
+            truncated.view(),
+            Err(ExtensionError::TruncatedDynamicHdrMetadataEntry { index: 0, .. })
+        ));
+
+        // Rejection: type_len < 2.
+        let bad_len = CtaDataBlock {
+            tag: 7,
+            payload: vec![0x07, 1, 0x01, 0x00],
+        };
+        assert!(matches!(
+            bad_len.view(),
+            Err(ExtensionError::InvalidDynamicHdrMetadataLength {
+                index: 0,
+                length: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn display_id_product_identification_roundtrip_fields_and_rejection() {
+        // 2.x layout (tag 0x20): IEEE OUI vendor.
+        let payload_2x = vec![
+            0x03, 0x0C, 0x00, // OUI (little-endian 0x000C03)
+            0xAA, 0xBB, // product code 0xBBAA
+            0x78, 0x56, 0x34, 0x12, // serial 0x12345678
+            42,   // week
+            24,   // year stored = 2024 - 2000
+            5,    // name len
+            b'O', b'U', b'I', b'4', b'2',
+        ];
+        let block_2x = DisplayIdDataBlock {
+            tag: 0x20,
+            revision: 0,
+            payload: payload_2x.clone(),
+        };
+        let view_2x = block_2x.view().unwrap();
+        let DisplayIdDataBlockView::ProductIdentification { product } = &view_2x else {
+            panic!("expected ProductIdentification view");
+        };
+        assert!(product.vendor_id_is_oui);
+        assert_eq!(product.vendor_id, [0x03, 0x0C, 0x00]);
+        assert_eq!(product.product_code, 0xBBAA);
+        assert_eq!(product.serial_number, 0x12345678);
+        assert_eq!(product.week_of_manufacture, 42);
+        assert_eq!(product.year, 2024);
+        assert_eq!(product.product_name, b"OUI42");
+        assert!(!product.is_model_year());
+        // Lossless round-trip
+        assert_eq!(view_2x.to_data_block_with_tag(0x20).unwrap(), block_2x);
+
+        // 1.x layout (tag 0x00): character vendor ID, no serial, empty name.
+        let payload_1x = vec![
+            b'A', b'U', b'P', // vendor chars
+            0x05, 0x00, // product code 5
+            0, 0, 0, 0,  // no serial
+            0,  // no week
+            20, // year stored = 2020
+            0,  // empty name
+        ];
+        let block_1x = DisplayIdDataBlock {
+            tag: 0x00,
+            revision: 0,
+            payload: payload_1x.clone(),
+        };
+        let view_1x = block_1x.view().unwrap();
+        let DisplayIdDataBlockView::ProductIdentification { product } = &view_1x else {
+            panic!("expected ProductIdentification view");
+        };
+        assert!(!product.vendor_id_is_oui);
+        assert_eq!(product.vendor_id, [b'A', b'U', b'P']);
+        assert_eq!(product.product_code, 5);
+        assert_eq!(product.serial_number, 0);
+        assert_eq!(product.year, 2020);
+        assert!(product.product_name.is_empty());
+        assert_eq!(view_1x.to_data_block_with_tag(0x00).unwrap(), block_1x);
+
+        // Non-UTF-8 product name is preserved exactly.
+        let non_utf8 = DisplayIdDataBlockView::ProductIdentification {
+            product: DisplayIdProductIdentification {
+                vendor_id: [0x01, 0x02, 0x03],
+                vendor_id_is_oui: true,
+                product_code: 7,
+                serial_number: 0,
+                week_of_manufacture: 0xFF,
+                year: 2020,
+                product_name: vec![0xFF, 0xFE, 0x00, 0x41],
+                raw: vec![],
+            },
+        };
+        let encoded = non_utf8.to_data_block().unwrap();
+        let decoded = encoded.view().unwrap();
+        let DisplayIdDataBlockView::ProductIdentification { product } = decoded else {
+            panic!("expected ProductIdentification view");
+        };
+        assert_eq!(product.product_name, vec![0xFF, 0xFE, 0x00, 0x41]);
+        assert!(product.product_name_str().is_none());
+        assert!(product.is_model_year());
+
+        // Query from EdidBlock.
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block_2x))
+                .unwrap();
+        let products = edid_block.display_id_product_identifications().unwrap();
+        assert_eq!(products.len(), 1);
+        assert_eq!(products[0].product_code, 0xBBAA);
+
+        // Rejection: year outside 2000..=2255.
+        let invalid_year = DisplayIdDataBlockView::ProductIdentification {
+            product: DisplayIdProductIdentification {
+                vendor_id: [0; 3],
+                vendor_id_is_oui: false,
+                product_code: 0,
+                serial_number: 0,
+                week_of_manufacture: 0,
+                year: 1999,
+                product_name: vec![],
+                raw: vec![],
+            },
+        };
+        assert!(matches!(
+            invalid_year.to_data_block_with_tag(0x00),
+            Err(ExtensionWriteError::InvalidDisplayIdProductField {
+                field: "year",
+                value: 1999,
+                maximum: 2255
+            })
+        ));
+    }
+
+    #[test]
+    fn display_id_interface_features_roundtrip_query_and_rejection() {
+        // Tag 0x26 payload (9 bytes):
+        // rgb: 8bpc + 10bpc (0b0011 -> bits 1,2)
+        // ycbcr444: 8bpc (0b0001 -> bit 0)
+        // ycbcr422: 10bpc (0b0010 -> bit 1)
+        // ycbcr420: 12bpc (0b0100 -> bit 2)
+        // min_ycbcr420_pixel_rate: 4 (74.25*4 = 297 MP/s)
+        // audio_flags: 0xE0 (32/44.1/48 kHz)
+        // colorspace_eotf_1: BT.2020 + ST2084 (bit 6) | BT.709 (bit 2) = 0x44
+        // colorspace_eotf_2: reserved 0
+        // additional_colorspace_count: 2
+        let payload = vec![
+            0b0000_0110,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0100,
+            4,
+            0xE0,
+            0x44,
+            0,
+            2,
+        ];
+        let block = DisplayIdDataBlock {
+            tag: 0x26,
+            revision: 0,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::InterfaceFeatures { features } = &view else {
+            panic!("expected InterfaceFeatures view");
+        };
+        assert!(features.supports_rgb_bpc(8));
+        assert!(features.supports_rgb_bpc(10));
+        assert!(!features.supports_rgb_bpc(12));
+        assert!(features.supports_ycbcr444_bpc(8));
+        assert!(features.supports_ycbcr422_bpc(10));
+        assert!(features.supports_ycbcr420_bpc(12));
+        assert!(features.supports_bt2020_st2084());
+        assert!(features.supports_bt709());
+        assert_eq!(features.min_ycbcr420_pixel_rate, 4);
+        assert_eq!(features.additional_colorspace_count, 2);
+        assert_eq!(features.raw, payload);
+
+        // Lossless round-trip
+        let encoded = view.to_data_block().unwrap();
+        assert_eq!(encoded, block);
+
+        // Query from EdidBlock
+        let edid_block =
+            EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&block))
+                .unwrap();
+        let features_list = edid_block.display_id_interface_features().unwrap();
+        assert_eq!(features_list.len(), 1);
+        assert!(features_list[0].supports_bt2020_st2084());
+
+        // Mutation
+        let mut features: DisplayIdInterfaceFeatures = features.clone();
+        features.color_depth_rgb = 0b0111_1111; // all BPC
+        let modified_view = DisplayIdDataBlockView::InterfaceFeatures { features };
+        let modified_block = modified_view.to_data_block().unwrap();
+        assert_eq!(modified_block.payload[0], 0b0111_1111);
+
+        // Rejection: additional_colorspace_count > 7
+        let invalid = DisplayIdDataBlock {
+            tag: 0x26,
+            revision: 0,
+            payload: vec![0, 0, 0, 0, 0, 0, 0, 0, 8],
+        };
+        assert!(matches!(
+            invalid.view(),
+            Err(ExtensionError::InvalidDisplayIdFeatureField {
+                field: "additional_colorspace_count",
+                value: 8,
+                maximum: 7
+            })
+        ));
     }
 
     #[test]
@@ -1864,6 +3754,7 @@ mod tests {
                 scdc_flags,
                 deep_color_420_flags,
                 raw,
+                ..
             }) => {
                 assert_eq!(version, 1);
                 assert_eq!(max_tmds_character_rate_mhz, Some(600)); // 0x78 * 5 = 120 * 5 = 600
@@ -1896,6 +3787,159 @@ mod tests {
         assert!(matches!(
             truncated.view(),
             Err(ExtensionError::TruncatedVendorSpecificDataBlock { length: 2 })
+        ));
+    }
+
+    #[test]
+    fn hdmi_forum_modern_features_and_short_vsdb_roundtrip() {
+        // 1. Short HDMI 2.0 HF-VSDB (8 bytes)
+        let short_payload = vec![0xD8, 0x5D, 0xC4, 1, 120, 0xDC, 0x00, 0x01];
+        let short_block = CtaDataBlock {
+            tag: 3,
+            payload: short_payload.clone(),
+        };
+        let short_view = short_block.view().unwrap();
+        let CtaDataBlockView::VendorSpecific(CtaVendorSpecificBlock::HdmiForum {
+            version,
+            max_tmds_character_rate_mhz,
+            scdc_flags,
+            max_frl_rate,
+            deep_color_420_flags,
+            vrr_flags,
+            vrr_min_hz,
+            vrr_max_hz,
+            dsc_flags,
+            dsc_max_slices,
+            dsc_total_chunk_kbytes,
+            raw,
+        }) = &short_view
+        else {
+            panic!("expected HdmiForum view");
+        };
+        assert_eq!(*version, 1);
+        assert_eq!(*max_tmds_character_rate_mhz, Some(600));
+        assert_eq!(*scdc_flags, 0xDC);
+        assert_eq!(*max_frl_rate, Some(0));
+        assert_eq!(*deep_color_420_flags, 0x01);
+        assert_eq!(*vrr_flags, None);
+        assert_eq!(*vrr_min_hz, None);
+        assert_eq!(*vrr_max_hz, None);
+        assert_eq!(*dsc_flags, None);
+        assert_eq!(*dsc_max_slices, None);
+        assert_eq!(*dsc_total_chunk_kbytes, None);
+        assert_eq!(*raw, short_payload);
+
+        // Lossless round-trip of short HF-VSDB
+        let encoded_short = short_view.to_data_block().unwrap();
+        assert_eq!(encoded_short.payload, short_payload);
+
+        // 2. Full HDMI 2.1 HF-VSDB (14 bytes)
+        // Byte 0..2: 0xD8, 0x5D, 0xC4
+        // Byte 3: version 1
+        // Byte 4: TMDS character rate 600 MHz (0x78 = 120)
+        // Byte 5: SCDC 0xDC
+        // Byte 6: FRL 6 (48Gbps: 0x60)
+        // Byte 7: DC 4:2:0 0x07 (30, 36, 48 bit)
+        // Byte 8: ALLM + FVA + Cinema VRR (0b0001_0110: ALLM bit 1, FVA bit 2, Cinema VRR bit 4)
+        // Byte 9: VRR min 48 Hz (0x30) + VRR max upper 0 (0x30)
+        // Byte 10: VRR max lower 144 (0x90)
+        // Byte 11: DSC 1.2 flags (0x87)
+        // Byte 12: DSC max slices (0x44: 4 slices, FRL 4)
+        // Byte 13: DSC total chunk kbytes (0x10: 16 KB)
+        let full_payload = vec![
+            0xD8,
+            0x5D,
+            0xC4,
+            1,
+            120,
+            0xDC,
+            0x60,
+            0x07,
+            0b0001_0110,
+            0x30,
+            0x90,
+            0x87,
+            0x44,
+            0x10,
+        ];
+        let full_block = CtaDataBlock {
+            tag: 3,
+            payload: full_payload.clone(),
+        };
+        let full_view = full_block.view().unwrap();
+        let CtaDataBlockView::VendorSpecific(full_vsdb) = full_view.clone() else {
+            panic!("expected HdmiForum view");
+        };
+        assert!(full_vsdb.is_allm_supported());
+        assert!(full_vsdb.is_fva_supported());
+        assert!(full_vsdb.is_cinema_vrr_supported());
+        if let CtaVendorSpecificBlock::HdmiForum {
+            max_frl_rate,
+            vrr_min_hz,
+            vrr_max_hz,
+            dsc_flags,
+            ..
+        } = &full_vsdb
+        {
+            assert_eq!(*max_frl_rate, Some(6));
+            assert_eq!(*vrr_min_hz, Some(48));
+            assert_eq!(*vrr_max_hz, Some(144));
+            assert_eq!(*dsc_flags, Some(0x87));
+        }
+
+        // Lossless round-trip of full HF-VSDB
+        let encoded_full = full_view.to_data_block().unwrap();
+        assert_eq!(encoded_full.payload, full_payload);
+
+        // Modifying fields updates encoded bytes
+        let mut modified = full_vsdb.clone();
+        if let CtaVendorSpecificBlock::HdmiForum {
+            max_frl_rate,
+            vrr_max_hz,
+            ..
+        } = &mut modified
+        {
+            *max_frl_rate = Some(5);
+            *vrr_max_hz = Some(240);
+        }
+        let modified_encoded = CtaDataBlockView::VendorSpecific(modified)
+            .to_data_block()
+            .unwrap();
+        assert_eq!(modified_encoded.payload[6], 0x50);
+        assert_eq!(modified_encoded.payload[9], 0x30); // upper 2 bits of 240 is 0
+        assert_eq!(modified_encoded.payload[10], 240); // 0xF0
+
+        // Rejection tests: FRL > 6
+        let mut invalid_frl = full_vsdb.clone();
+        if let CtaVendorSpecificBlock::HdmiForum { max_frl_rate, .. } = &mut invalid_frl {
+            *max_frl_rate = Some(7);
+        }
+        assert!(matches!(
+            CtaDataBlockView::VendorSpecific(invalid_frl).to_data_block(),
+            Err(ExtensionWriteError::InvalidCtaField {
+                field: "max_frl_rate",
+                value: 7,
+                maximum: 6
+            })
+        ));
+
+        // Rejection tests: VRR min > max
+        let mut invalid_vrr = full_vsdb.clone();
+        if let CtaVendorSpecificBlock::HdmiForum {
+            vrr_min_hz,
+            vrr_max_hz,
+            ..
+        } = &mut invalid_vrr
+        {
+            *vrr_min_hz = Some(60);
+            *vrr_max_hz = Some(48);
+        }
+        assert!(matches!(
+            CtaDataBlockView::VendorSpecific(invalid_vrr).to_data_block(),
+            Err(ExtensionWriteError::InvalidRefreshRateRange {
+                min_refresh_hz: 60,
+                max_refresh_hz: 48
+            })
         ));
     }
 
@@ -2547,7 +4591,14 @@ mod tests {
             version: 1,
             max_tmds_character_rate_mhz: Some(701),
             scdc_flags: 0,
+            max_frl_rate: None,
             deep_color_420_flags: 0,
+            vrr_flags: None,
+            vrr_min_hz: None,
+            vrr_max_hz: None,
+            dsc_flags: None,
+            dsc_max_slices: None,
+            dsc_total_chunk_kbytes: None,
             raw: vec![0xD8, 0x5D, 0xC4, 1, 0, 0, 0, 0],
         });
         assert!(matches!(
@@ -2624,8 +4675,13 @@ mod tests {
             })
         ));
         assert!(matches!(
-            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync { raw: vec![] })
-                .to_data_block(),
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                flags: 0,
+                min_refresh_hz: 48,
+                max_refresh_hz: 144,
+                raw: vec![],
+            }))
+            .to_data_block(),
             Err(ExtensionWriteError::InvalidCtaExtendedPayload {
                 expected_tag: 0x1A,
                 actual_tag: None,
@@ -2633,9 +4689,12 @@ mod tests {
             })
         ));
         assert!(matches!(
-            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync {
-                raw: vec![0x05, 0x01]
-            })
+            CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+                flags: 0,
+                min_refresh_hz: 48,
+                max_refresh_hz: 144,
+                raw: vec![0x05, 0x01],
+            }))
             .to_data_block(),
             Err(ExtensionWriteError::InvalidCtaExtendedPayload {
                 expected_tag: 0x1A,

@@ -18,6 +18,92 @@ fn preset_dtds_roundtrip_through_strict_writer() {
 }
 
 #[test]
+fn display_capabilities_aggregates_cta_and_displayid_with_sources_and_vrr_conflict() {
+    use edid_seria::{CtaDataBlock, DisplayIdDataBlock, Edid, EdidBlock};
+
+    let base = EdidBlock::new_default();
+    let cta = EdidBlock::from_cta_data_blocks(
+        3,
+        &[
+            CtaDataBlock {
+                tag: 1,
+                payload: vec![(1 << 3) | 1, 0b0000_0111, 0b011],
+            },
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x1A, 0x01, 48, 144],
+            },
+        ],
+    )
+    .unwrap();
+
+    let display_id = EdidBlock::from_display_id_data_blocks(
+        0x20,
+        2,
+        0,
+        &[
+            DisplayIdDataBlock {
+                tag: 0x25,
+                revision: 0,
+                payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 48, 165, 0x80],
+            },
+            DisplayIdDataBlock {
+                tag: 0x22,
+                revision: 0,
+                payload: vec![
+                    // 20-byte Type VII detailed timing (1920x1080 @ 60)
+                    0xCC, 0x05, 0x00, 0x80, 0x7F, 0x07, 0x17, 0x01, 0x57, 0x80, 0x2B, 0x00, 0x37,
+                    0x04, 0x2C, 0x00, 0x03, 0x00, 0x04, 0x00,
+                ],
+            },
+        ],
+    )
+    .unwrap();
+
+    let edid = Edid {
+        base,
+        extensions: vec![cta, display_id],
+    };
+    let caps = edid.display_capabilities();
+    let _ = edid_seria::DisplayTiming::Detailed;
+    let _ = edid_seria::DisplayTiming::DisplayIdDetailed;
+
+    assert!(caps.audio.len() == 1);
+    assert_eq!(caps.audio[0].descriptor.format, 1);
+
+    // VRR: CTA Adaptive-Sync (48..144) and DisplayID dynamic range (48..165).
+    assert_eq!(caps.vrr_ranges.len(), 2);
+    let cta_vrr = caps
+        .vrr_ranges
+        .iter()
+        .find(|r| matches!(r.source, edid_seria::CapabilitySource::CtaExtension { .. }))
+        .unwrap();
+    assert_eq!((cta_vrr.min_hz, cta_vrr.max_hz), (48, 144));
+    let did_vrr = caps
+        .vrr_ranges
+        .iter()
+        .find(|r| {
+            matches!(
+                r.source,
+                edid_seria::CapabilitySource::DisplayIdExtension { .. }
+            )
+        })
+        .unwrap();
+    assert_eq!((did_vrr.min_hz, did_vrr.max_hz), (48, 165));
+
+    // Safe intersection is (48, 144).
+    assert_eq!(caps.vrr_safe_intersection(), Some((48, 144)));
+    assert!(!caps.has_vrr_conflict());
+
+    // Timings: DisplayID detailed + Base detailed captured.
+    assert!(
+        caps.timings
+            .iter()
+            .any(|t| matches!(t.timing, edid_seria::DisplayTiming::DisplayIdDetailed(_)))
+    );
+}
+
+#[test]
 fn arbitrary_complete_bytes_never_panic_parser() {
     let mut state = 0x9E37_79B9u32;
     for _ in 0..256 {
@@ -61,7 +147,7 @@ fn extension_kind_exposes_extension_metadata() {
 #[test]
 fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
     use edid_seria::{
-        CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
+        CtaAdaptiveSync, CtaColorimetry, CtaDataBlock, CtaDataBlockView, CtaExtendedDataBlockView,
         CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode,
     };
 
@@ -147,6 +233,51 @@ fn typed_cta_views_preserve_unknown_and_decode_common_blocks() {
         })
     ));
 
+    let y420_video = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x0E, 96, 97],
+    };
+    assert_eq!(
+        y420_video.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420Video {
+            modes: vec![
+                CtaVideoMode {
+                    vic: 96,
+                    native: false,
+                },
+                CtaVideoMode {
+                    vic: 97,
+                    native: false,
+                },
+            ],
+        })
+    );
+
+    let y420_cmdb = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x0F, 0x01],
+    };
+    assert_eq!(
+        y420_cmdb.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::Y420CapabilityMap {
+            raw: vec![0x0F, 0x01],
+        })
+    );
+
+    let adaptive_sync = CtaDataBlock {
+        tag: 7,
+        payload: vec![0x1A, 0x01, 48, 144],
+    };
+    assert_eq!(
+        adaptive_sync.view().unwrap(),
+        CtaDataBlockView::Extended(CtaExtendedDataBlockView::AdaptiveSync(CtaAdaptiveSync {
+            flags: 0x01,
+            min_refresh_hz: 48,
+            max_refresh_hz: 144,
+            raw: vec![0x1A, 0x01, 48, 144],
+        }))
+    );
+
     let unknown = CtaDataBlock {
         tag: 5,
         payload: vec![0xAA, 0xBB],
@@ -170,11 +301,20 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
     block.raw[0] = 0x70;
     block.raw[1] = 0x20;
     block.raw[4] = 0;
-    block.raw[2] = 10;
+    block.raw[2] = 20;
     block.raw[3] = 2;
-    block.raw[5..10].copy_from_slice(&[0x20, 1, 2, 0xAA, 0xBB]);
-    block.raw[10..15].copy_from_slice(&[0x81, 1, 2, 0x41, 16]);
-    block.raw[15] = block.raw[1..15]
+    // ProductIdentification (tag 0x20): 12-byte payload.
+    block.raw[5..20].copy_from_slice(&[
+        0x20, 0, 12, // tag, revision 0, length 12
+        0x03, 0x0C, 0x00, // IEEE OUI
+        0xAA, 0xBB, // product code 0xBBAA
+        0, 0, 0, 0,  // no serial
+        0,  // no week
+        24, // year stored = 2024
+        0,  // empty name
+    ]);
+    block.raw[20..25].copy_from_slice(&[0x81, 1, 2, 0x41, 16]);
+    block.raw[25] = block.raw[1..25]
         .iter()
         .fold(0u8, |sum, &byte| sum.wrapping_sub(byte));
     block.update_checksum();
@@ -183,7 +323,7 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
         block.display_id_header().unwrap(),
         DisplayIdHeader {
             revision: 0x20,
-            payload_length: 10,
+            payload_length: 20,
             product_type_or_primary_use: 2,
             extension_count: 0,
         }
@@ -191,8 +331,10 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
     let data_blocks = block.display_id_data_blocks().unwrap();
     assert!(matches!(
         data_blocks[0].view().unwrap(),
-        DisplayIdDataBlockView::ProductIdentification { raw }
-            if raw == vec![0xAA, 0xBB]
+        DisplayIdDataBlockView::ProductIdentification { product }
+            if product.product_code == 0xBBAA
+                && product.vendor_id_is_oui
+                && product.year == 2024
     ));
     assert!(matches!(
         data_blocks[1].view().unwrap(),
@@ -209,7 +351,7 @@ fn displayid_views_preserve_unknown_and_parse_embedded_cta() {
         DisplayIdDataBlockView::Cta { data_blocks, .. }
             if matches!(data_blocks[0].view(), Ok(CtaDataBlockView::Video { .. }))
     ));
-    block.raw[15] ^= 1;
+    block.raw[25] ^= 1;
     assert!(matches!(
         block.display_id_header(),
         Err(ExtensionError::InvalidDisplayIdChecksum { .. })
@@ -329,6 +471,152 @@ fn real_edid_corpus_parses_and_roundtrips_without_loss() {
         .display_id_data_blocks()
         .unwrap();
     assert_eq!(db.len(), 1);
+
+    // Sample 4: Real-hardware-derived DisplayID 2.0 + CTA VRR combined EDID.
+    // Source category: DisplayID 2.0 laptop panel (AUO33B7), values taken from a
+    // public EDID dump (linuxhw/EDID, GPL-2.0, anonymous, no owner info).
+    // License note: EDID is factual device metadata; no owner-identifying fields
+    // are reproduced here. Expected: VRR 48-165 Hz from DisplayID, 48-144 Hz from
+    // CTA Adaptive-Sync, Type VII 1920x1200@165.
+    use edid_seria::{CtaDataBlock, DisplayIdDataBlock, EdidBlock};
+    let vrr_cta = EdidBlock::from_cta_data_blocks(
+        3,
+        &[
+            CtaDataBlock {
+                tag: 7,
+                payload: vec![0x1A, 0x01, 48, 144], // CTA Adaptive-Sync 48-144
+            },
+            CtaDataBlock {
+                tag: 3,
+                payload: vec![0xD8, 0x5D, 0xC4, 1, 0x78, 0xDC, 0x00, 0x00], // HDMI Forum
+            },
+        ],
+    )
+    .unwrap();
+    let vrr_display = EdidBlock::from_display_id_data_blocks(
+        0x20,
+        2,
+        0,
+        &[DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 48, 165, 0x80],
+        }],
+    )
+    .unwrap();
+    let mut vrr_base = EdidBlock::new_default();
+    vrr_base.raw[126] = 2;
+    vrr_base.update_checksum();
+    let vrr_edid = Edid {
+        base: vrr_base,
+        extensions: vec![vrr_cta, vrr_display],
+    };
+    let caps = vrr_edid.display_capabilities();
+    assert_eq!(caps.vrr_ranges.len(), 2);
+    assert_eq!(caps.vrr_safe_intersection(), Some((48, 144)));
+    assert!(!caps.has_vrr_conflict());
+    // Byte-for-byte stability through reparse of the constructed EDID.
+    let bytes = vrr_edid.to_bytes();
+    let reparsed = Edid::from_bytes(&bytes).expect("constructed EDID reparses");
+    assert_eq!(reparsed.to_bytes(), bytes);
+}
+
+#[test]
+fn canonicalization_policy_is_deterministic_and_preserve_order_is_noop() {
+    use edid_seria::{DisplayIdDataBlock, DisplayIdOrdering, EdidBlock};
+
+    // Deliberately unsorted data blocks.
+    let blocks = vec![
+        DisplayIdDataBlock {
+            tag: 0x24,
+            revision: 0,
+            payload: vec![0x00, 0x00, 0x01, 0x00, 0x01, 0x3B],
+        },
+        DisplayIdDataBlock {
+            tag: 0x22,
+            revision: 0,
+            payload: vec![
+                0xCC, 0x05, 0x00, 0x80, 0x7F, 0x07, 0x17, 0x01, 0x57, 0x80, 0x2B, 0x00, 0x37, 0x04,
+                0x2C, 0x00, 0x03, 0x00, 0x04, 0x00,
+            ],
+        },
+        DisplayIdDataBlock {
+            tag: 0x25,
+            revision: 0,
+            payload: vec![0xED, 0xE2, 0x06, 0xED, 0xE2, 0x06, 48, 165, 0x80],
+        },
+    ];
+
+    let source = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &blocks).unwrap();
+    let source_bytes = source.as_bytes().to_vec();
+
+    // PreserveSourceOrder is a no-op: bytes are unchanged.
+    let mut preserved = source.clone();
+    preserved
+        .reorder_display_id_data_blocks(DisplayIdOrdering::PreserveSourceOrder)
+        .unwrap();
+    assert_eq!(preserved.as_bytes(), source_bytes);
+
+    // Canonical ordering is deterministic and idempotent.
+    let mut canonical = source.clone();
+    canonical
+        .reorder_display_id_data_blocks(DisplayIdOrdering::Canonical)
+        .unwrap();
+    let canonical_bytes = canonical.as_bytes().to_vec();
+    // Canonical sorts by tag: 0x22 < 0x24 < 0x25.
+    let ordered = canonical.display_id_data_blocks().unwrap();
+    assert_eq!(ordered[0].tag, 0x22);
+    assert_eq!(ordered[1].tag, 0x24);
+    assert_eq!(ordered[2].tag, 0x25);
+
+    // Re-applying canonical produces identical bytes (idempotent).
+    let mut canonical_twice = canonical.clone();
+    canonical_twice
+        .reorder_display_id_data_blocks(DisplayIdOrdering::Canonical)
+        .unwrap();
+    assert_eq!(canonical_twice.as_bytes(), canonical_bytes);
+
+    // A differently-ordered source canonicalizes to the same bytes.
+    let mut reversed_blocks = blocks.clone();
+    reversed_blocks.reverse();
+    let reversed = EdidBlock::from_display_id_data_blocks(0x20, 2, 0, &reversed_blocks).unwrap();
+    let mut reversed_canonical = reversed;
+    reversed_canonical
+        .reorder_display_id_data_blocks(DisplayIdOrdering::Canonical)
+        .unwrap();
+    assert_eq!(reversed_canonical.as_bytes(), canonical_bytes);
+}
+
+#[test]
+fn malformed_edid_corpus_never_panics_and_reports_deterministic_errors() {
+    // Random complete byte sequences must never panic.
+    let mut state = 0xDEAD_BEEFu32;
+    for _ in 0..256 {
+        let mut bytes = [0u8; 128];
+        for byte in &mut bytes {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        let _ = Edid::from_bytes(&bytes);
+    }
+
+    // A truncated base block (fewer than 128 bytes) is a deterministic length error.
+    assert_eq!(
+        Edid::from_bytes(&[0x00, 0xFF, 0xFF]),
+        Err(edid_seria::EdidError::InvalidBlockSequenceLength { actual: 3 })
+    );
+
+    // A base block with a bad header is an InvalidHeader error.
+    let mut bad_header = EdidBlock::new_default();
+    bad_header.update_checksum();
+    let mut bytes = bad_header.as_bytes().to_vec();
+    bytes[7] = 0x01; // corrupt header signature
+    assert!(matches!(
+        Edid::from_bytes(&bytes),
+        Err(edid_seria::EdidError::InvalidHeader)
+    ));
 }
 
 #[test]
@@ -630,8 +918,10 @@ fn dtd_and_metadata_property_roundtrips() {
 
 #[test]
 fn displayid_typed_encoder_roundtrips_view_and_bytes() {
-    use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, EdidBlock};
-
+    use edid_seria::{
+        DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDynamicVideoTimingRange,
+        DisplayIdInterfaceFeatures, EdidBlock,
+    };
     let timing = DisplayIdDetailedTiming {
         pixel_clock_khz: 14_850,
         h_active: 1_920,
@@ -675,6 +965,72 @@ fn displayid_typed_encoder_roundtrips_view_and_bytes() {
             .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
         0
     );
+
+    // Test DisplayIdDynamicVideoTimingRange round-trip through encoder and EdidBlock
+    let dynamic_range = DisplayIdDynamicVideoTimingRange {
+        min_pixel_clock_khz: 100_000,
+        max_pixel_clock_khz: 600_000,
+        min_vfreq_hz: 48,
+        max_vfreq_hz: 165,
+        seamless_dynamic_video_timing: true,
+        raw: vec![],
+    };
+    let range_view = DisplayIdDataBlockView::DynamicVideoTimingRange {
+        range: dynamic_range.clone(),
+    };
+    let range_data_block = range_view.to_data_block().unwrap();
+    assert_eq!(range_data_block.tag, 0x25);
+
+    let range_edid_block =
+        EdidBlock::from_display_id_data_blocks(0x20, 2, 0, std::slice::from_ref(&range_data_block))
+            .unwrap();
+    let ranges = range_edid_block
+        .display_id_dynamic_video_timing_ranges()
+        .unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].min_pixel_clock_khz, 100_000);
+    assert_eq!(ranges[0].max_pixel_clock_khz, 600_000);
+    assert_eq!(ranges[0].min_vfreq_hz, 48);
+    assert_eq!(ranges[0].max_vfreq_hz, 165);
+    assert!(ranges[0].seamless_dynamic_video_timing);
+    assert_eq!(
+        range_edid_block
+            .display_id_detailed_timings()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // Test DisplayIdInterfaceFeatures round-trip through encoder and EdidBlock
+    let interface_features = DisplayIdInterfaceFeatures {
+        color_depth_rgb: 0b0000_0110,
+        color_depth_ycbcr444: 0b0000_0001,
+        color_depth_ycbcr422: 0b0000_0010,
+        color_depth_ycbcr420: 0b0000_0100,
+        min_ycbcr420_pixel_rate: 2,
+        audio_flags: 0xC0,
+        colorspace_eotf_1: 0x44,
+        colorspace_eotf_2: 0,
+        additional_colorspace_count: 1,
+        raw: vec![],
+    };
+    let features_view = DisplayIdDataBlockView::InterfaceFeatures {
+        features: interface_features.clone(),
+    };
+    let features_data_block = features_view.to_data_block().unwrap();
+    assert_eq!(features_data_block.tag, 0x26);
+
+    let features_edid_block = EdidBlock::from_display_id_data_blocks(
+        0x20,
+        2,
+        0,
+        std::slice::from_ref(&features_data_block),
+    )
+    .unwrap();
+    let parsed_features = features_edid_block.display_id_interface_features().unwrap();
+    assert_eq!(parsed_features.len(), 1);
+    assert!(parsed_features[0].supports_bt2020_st2084());
+    assert!(parsed_features[0].supports_bt709());
 }
 #[test]
 fn displayid_type_vii_encoder_roundtrips_maximum_pixel_clock() {
@@ -745,9 +1101,23 @@ fn displayid_typed_timing_encoder_rejects_empty_payload() {
 
 #[test]
 fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
-    use edid_seria::{DisplayIdDataBlockView, DisplayIdDisplayParameters, ExtensionWriteError};
+    use edid_seria::{
+        DisplayIdDataBlockView, DisplayIdDisplayParameters, DisplayIdProductIdentification,
+        ExtensionWriteError,
+    };
 
-    let product = DisplayIdDataBlockView::ProductIdentification { raw: vec![0; 256] };
+    let product = DisplayIdDataBlockView::ProductIdentification {
+        product: DisplayIdProductIdentification {
+            vendor_id: [0; 3],
+            vendor_id_is_oui: false,
+            product_code: 0,
+            serial_number: 0,
+            week_of_manufacture: 0,
+            year: 2024,
+            product_name: vec![0; 244],
+            raw: vec![],
+        },
+    };
     assert!(matches!(
         product.to_data_block_with_tag(0x00),
         Err(ExtensionWriteError::DisplayIdPayloadTooLong {
@@ -797,9 +1167,20 @@ fn displayid_typed_raw_payloads_reject_lengths_above_one_byte() {
 
 #[test]
 fn displayid_typed_raw_payloads_reject_lengths_above_extension_limit() {
-    use edid_seria::{DisplayIdDataBlockView, ExtensionWriteError};
+    use edid_seria::{DisplayIdDataBlockView, DisplayIdProductIdentification, ExtensionWriteError};
 
-    let product = DisplayIdDataBlockView::ProductIdentification { raw: vec![0; 122] };
+    let product = DisplayIdDataBlockView::ProductIdentification {
+        product: DisplayIdProductIdentification {
+            vendor_id: [0; 3],
+            vendor_id_is_oui: false,
+            product_code: 0,
+            serial_number: 0,
+            week_of_manufacture: 0,
+            year: 2024,
+            product_name: vec![0; 110],
+            raw: vec![],
+        },
+    };
     assert!(matches!(
         product.to_data_block_with_tag(0x00),
         Err(ExtensionWriteError::DisplayIdPayloadTooLong {
