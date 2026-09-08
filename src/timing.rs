@@ -151,7 +151,11 @@ impl DetailedTiming {
             v_sync_width: self.v_sync,
             h_sync_positive: self.h_pol,
             v_sync_positive: self.v_pol,
+            aspect_ratio: crate::extensions::DisplayIdAspectRatio::Calculated,
+            interlaced: false,
+            stereo_3d: crate::extensions::DisplayIdStereo3d::Mono,
             preferred,
+            ycbcr420: false,
         }
     }
 

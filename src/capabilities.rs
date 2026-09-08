@@ -283,6 +283,15 @@ fn collect_display_id_extension(
             });
         }
     }
+    if let Ok(ranges) = block.display_id_video_timing_range_limits() {
+        for range in ranges {
+            caps.vrr_ranges.push(VrrRange {
+                source,
+                min_hz: u16::from(range.min_vfreq_hz),
+                max_hz: u16::from(range.max_vfreq_hz),
+            });
+        }
+    }
     if let Ok(features) = block.display_id_interface_features() {
         for feature in features {
             caps.interfaces.push(InterfaceSource {

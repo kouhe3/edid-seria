@@ -33,11 +33,11 @@ pub use extensions::{
     CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
     CtaDataBlockView, CtaExtendedDataBlockView, CtaHdrDynamicMetadataEntry, CtaHeader,
     CtaSpeakerAllocation, CtaVendorSpecificBlock, CtaVideoCapability, CtaVideoMode, CtaY420Support,
-    DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
+    DisplayIdAspectRatio, DisplayIdDataBlock, DisplayIdDataBlockView, DisplayIdDetailedTiming,
     DisplayIdDisplayParameters, DisplayIdDynamicVideoTimingRange, DisplayIdEnumeratedTiming,
     DisplayIdFormulaTiming, DisplayIdHeader, DisplayIdInterfaceFeatures, DisplayIdOrdering,
-    DisplayIdProductIdentification, DisplayIdTiledDisplayTopology, ExtensionError, ExtensionKind,
-    ExtensionWriteError,
+    DisplayIdProductIdentification, DisplayIdStereo3d, DisplayIdTiledDisplayTopology,
+    DisplayIdVideoTimingRangeLimits, ExtensionError, ExtensionKind, ExtensionWriteError,
 };
 pub use metadata::{
     AdditionalColorPoint, BaseMetadata, ChromaticityCoordinates, ChromaticityPoint,

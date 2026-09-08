@@ -83,6 +83,94 @@ pub struct DisplayIdDataBlock {
     pub payload: Vec<u8>,
 }
 
+/// Aspect ratio of a DisplayID Type I/VII detailed timing (byte 3 bits 3:0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayIdAspectRatio {
+    /// 1:1.
+    OneToOne,
+    /// 5:4.
+    FiveToFour,
+    /// 4:3.
+    FourToThree,
+    /// 15:9.
+    FifteenToNine,
+    /// 16:9.
+    SixteenToNine,
+    /// 16:10.
+    SixteenToTen,
+    /// 64:27.
+    SixtyFourToTwentySeven,
+    /// 256:135.
+    TwoHundredFiftySixToOneThirtyFive,
+    /// Value 8: derive the ratio from the active image size.
+    Calculated,
+    /// Reserved value (9..=15), preserved verbatim.
+    Reserved(u8),
+}
+
+impl DisplayIdAspectRatio {
+    const fn from_nibble(value: u8) -> Self {
+        match value {
+            0 => Self::OneToOne,
+            1 => Self::FiveToFour,
+            2 => Self::FourToThree,
+            3 => Self::FifteenToNine,
+            4 => Self::SixteenToNine,
+            5 => Self::SixteenToTen,
+            6 => Self::SixtyFourToTwentySeven,
+            7 => Self::TwoHundredFiftySixToOneThirtyFive,
+            8 => Self::Calculated,
+            v => Self::Reserved(v),
+        }
+    }
+    const fn nibble(self) -> u8 {
+        match self {
+            Self::OneToOne => 0,
+            Self::FiveToFour => 1,
+            Self::FourToThree => 2,
+            Self::FifteenToNine => 3,
+            Self::SixteenToNine => 4,
+            Self::SixteenToTen => 5,
+            Self::SixtyFourToTwentySeven => 6,
+            Self::TwoHundredFiftySixToOneThirtyFive => 7,
+            Self::Calculated => 8,
+            Self::Reserved(v) => v & 0x0F,
+        }
+    }
+}
+
+/// Stereoscopic 3D mode of a DisplayID Type I/VII detailed timing (byte 3 bits 6:5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayIdStereo3d {
+    /// Mono timing.
+    Mono,
+    /// 3D stereo timing.
+    Stereo3d,
+    /// Mono or 3D stereo depending on user action.
+    UserAction,
+    /// Reserved.
+    Reserved,
+}
+
+impl DisplayIdStereo3d {
+    const fn from_bits(value: u8) -> Self {
+        match value & 0x03 {
+            0 => Self::Mono,
+            1 => Self::Stereo3d,
+            2 => Self::UserAction,
+            _ => Self::Reserved,
+        }
+    }
+    const fn bits(self) -> u8 {
+        match self {
+            Self::Mono => 0,
+            Self::Stereo3d => 1,
+            Self::UserAction => 2,
+            Self::Reserved => 3,
+        }
+    }
+}
+
 /// One DisplayID detailed timing entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayIdDetailedTiming {
@@ -108,8 +196,16 @@ pub struct DisplayIdDetailedTiming {
     pub h_sync_positive: bool,
     /// Vertical sync polarity.
     pub v_sync_positive: bool,
-    /// Whether this entry is marked as preferred.
+    /// Aspect ratio (byte 3 bits 3:0).
+    pub aspect_ratio: DisplayIdAspectRatio,
+    /// Whether the timing is interlaced (byte 3 bit 4).
+    pub interlaced: bool,
+    /// Stereoscopic 3D mode (byte 3 bits 6:5).
+    pub stereo_3d: DisplayIdStereo3d,
+    /// Preferred timing (byte 3 bit 7, block revision < 2).
     pub preferred: bool,
+    /// YCbCr 4:2:0 support (byte 3 bit 7, block revision >= 2).
+    pub ycbcr420: bool,
 }
 
 /// Typed DisplayID 1.x or 2.x Display Parameters Data Block.
@@ -160,6 +256,42 @@ pub struct DisplayIdDynamicVideoTimingRange {
     pub max_vfreq_hz: u16,
     /// Seamless dynamic video timing change / VRR support flag.
     pub seamless_dynamic_video_timing: bool,
+    /// Original payload bytes.
+    pub raw: Vec<u8>,
+}
+
+/// DisplayID 1.x Video Timing Range Limits Data Block (Tag 0x09).
+///
+/// Distinct from the 2.0 [`DisplayIdDynamicVideoTimingRange`] (Tag 0x25):
+/// the 1.x block is a fixed 15-byte structure that additionally carries
+/// horizontal-frequency, horizontal-blanking and vertical-blanking limits,
+/// plus CVT/interlaced/device-class capability flags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayIdVideoTimingRangeLimits {
+    /// Minimum pixel clock in kHz.
+    pub min_pixel_clock_khz: u32,
+    /// Maximum pixel clock in kHz.
+    pub max_pixel_clock_khz: u32,
+    /// Minimum horizontal frequency in kHz.
+    pub min_hfreq_khz: u8,
+    /// Maximum horizontal frequency in kHz.
+    pub max_hfreq_khz: u8,
+    /// Minimum horizontal blanking in pixels.
+    pub min_h_blanking: u16,
+    /// Minimum vertical refresh rate in Hz.
+    pub min_vfreq_hz: u8,
+    /// Maximum vertical refresh rate in Hz.
+    pub max_vfreq_hz: u8,
+    /// Minimum vertical blanking in lines.
+    pub min_v_blanking: u16,
+    /// Supports interlaced timings (flag bit 7).
+    pub supports_interlaced: bool,
+    /// Supports CVT timings (flag bit 6).
+    pub supports_cvt: bool,
+    /// Supports CVT reduced blanking (flag bit 5).
+    pub supports_cvt_reduced_blanking: bool,
+    /// Discrete-frequency display device (flag bit 4).
+    pub discrete_frequency: bool,
     /// Original payload bytes.
     pub raw: Vec<u8>,
 }
@@ -412,10 +544,15 @@ pub enum DisplayIdDataBlockView {
         /// Decoded interface features.
         features: DisplayIdInterfaceFeatures,
     },
-    /// DisplayID Dynamic Video Timing Range Limits (Tag 0x25 or Tag 0x09).
+    /// DisplayID 2.0 Dynamic Video Timing Range Limits (Tag 0x25).
     DynamicVideoTimingRange {
         /// Decoded dynamic video timing range limits.
         range: DisplayIdDynamicVideoTimingRange,
+    },
+    /// DisplayID 1.x Video Timing Range Limits (Tag 0x09).
+    VideoTimingRange1x {
+        /// Decoded 1.x video timing range limits.
+        range: DisplayIdVideoTimingRangeLimits,
     },
     /// DisplayID Type IX formula-based timings (Tag 0x24).
     FormulaTiming {
@@ -887,10 +1024,13 @@ impl DisplayIdDataBlock {
             0x0F | 0x26 => Ok(DisplayIdDataBlockView::InterfaceFeatures {
                 features: decode_interface_features(self)?,
             }),
-            0x09 | 0x25 => Ok(DisplayIdDataBlockView::DynamicVideoTimingRange {
+            0x09 => Ok(DisplayIdDataBlockView::VideoTimingRange1x {
+                range: decode_video_timing_range_limits(self)?,
+            }),
+            0x25 => Ok(DisplayIdDataBlockView::DynamicVideoTimingRange {
                 range: decode_dynamic_video_timing_range(self)?,
             }),
-            0x23 => Ok(DisplayIdDataBlockView::EnumeratedTiming {
+            0x06 | 0x23 => Ok(DisplayIdDataBlockView::EnumeratedTiming {
                 code_type: (self.revision & 0xC0) >> 6,
                 code_size: if self.revision & 0x08 != 0 { 2 } else { 1 },
                 codes: decode_enumerated_timing_codes(self)?,
@@ -939,6 +1079,7 @@ impl DisplayIdDataBlockView {
             Self::FormulaTiming { .. } => 0x24,
             Self::EnumeratedTiming { .. } => 0x23,
             Self::DynamicVideoTimingRange { .. } => 0x25,
+            Self::VideoTimingRange1x { .. } => 0x09,
             Self::TiledDisplayTopology { .. } => 0x28,
             Self::Cta { .. } => 0x81,
             Self::Unknown { tag, .. } => *tag,
@@ -1161,7 +1302,7 @@ impl DisplayIdDataBlockView {
                 code_type,
                 code_size,
                 codes,
-            } if tag == 0x23 => {
+            } if matches!(tag, 0x06 | 0x23) => {
                 if *code_type > 2 {
                     return Err(ExtensionWriteError::InvalidDisplayIdFeatureField {
                         field: "code_type",
@@ -1244,7 +1385,7 @@ impl DisplayIdDataBlockView {
                     payload,
                 })
             }
-            Self::DynamicVideoTimingRange { range } if matches!(tag, 0x09 | 0x25) => {
+            Self::DynamicVideoTimingRange { range } if tag == 0x25 => {
                 const MAX_PIXEL_KHZ: u32 = 0x0100_0000;
                 if !(1..=MAX_PIXEL_KHZ).contains(&range.min_pixel_clock_khz)
                     || !(1..=MAX_PIXEL_KHZ).contains(&range.max_pixel_clock_khz)
@@ -1281,6 +1422,68 @@ impl DisplayIdDataBlockView {
                 let seamless_bit = u8::from(range.seamless_dynamic_video_timing) << 7;
                 let upper_vfreq = ((range.max_vfreq_hz >> 8) & 0x03) as u8;
                 payload[8] = flags_base | seamless_bit | upper_vfreq;
+                Ok(DisplayIdDataBlock {
+                    tag,
+                    revision: 0,
+                    payload,
+                })
+            }
+            Self::VideoTimingRange1x { range } if tag == 0x09 => {
+                const MAX_PIXEL_KHZ: u32 = 0x0100_0000;
+                if !(1..=MAX_PIXEL_KHZ).contains(&range.min_pixel_clock_khz)
+                    || !(1..=MAX_PIXEL_KHZ).contains(&range.max_pixel_clock_khz)
+                    || range.min_pixel_clock_khz > range.max_pixel_clock_khz
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "pixel clock out of range or min exceeds max",
+                    });
+                }
+                if !range.min_pixel_clock_khz.is_multiple_of(10)
+                    || !range.max_pixel_clock_khz.is_multiple_of(10)
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "1.x pixel clock must be a multiple of 10 kHz",
+                    });
+                }
+                if range.min_hfreq_khz > range.max_hfreq_khz {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "horizontal frequency min exceeds max",
+                    });
+                }
+                if range.min_vfreq_hz == 0
+                    || range.max_vfreq_hz == 0
+                    || range.min_vfreq_hz > range.max_vfreq_hz
+                {
+                    return Err(ExtensionWriteError::InvalidDisplayIdDynamicRange {
+                        tag,
+                        reason: "vertical refresh out of range or min exceeds max",
+                    });
+                }
+                let mut payload = if range.raw.len() >= 15 {
+                    range.raw.clone()
+                } else {
+                    vec![0u8; 15]
+                };
+                check_display_id_payload_length(payload.len())?;
+                let min_clock = ((range.min_pixel_clock_khz / 10) - 1).to_le_bytes();
+                payload[0..3].copy_from_slice(&min_clock[..3]);
+                let max_clock = ((range.max_pixel_clock_khz / 10) - 1).to_le_bytes();
+                payload[3..6].copy_from_slice(&max_clock[..3]);
+                payload[6] = range.min_hfreq_khz;
+                payload[7] = range.max_hfreq_khz;
+                payload[8..10].copy_from_slice(&range.min_h_blanking.to_le_bytes());
+                payload[10] = range.min_vfreq_hz;
+                payload[11] = range.max_vfreq_hz;
+                payload[12..14].copy_from_slice(&range.min_v_blanking.to_le_bytes());
+                let mut flags = payload[14] & 0x0F;
+                flags |= u8::from(range.supports_interlaced) << 7;
+                flags |= u8::from(range.supports_cvt) << 6;
+                flags |= u8::from(range.supports_cvt_reduced_blanking) << 5;
+                flags |= u8::from(range.discrete_frequency) << 4;
+                payload[14] = flags;
                 Ok(DisplayIdDataBlock {
                     tag,
                     revision: 0,
@@ -1346,7 +1549,11 @@ fn encode_display_id_timing(
     let mut bytes = [0u8; 20];
     let clock = (pixel_unit - 1).to_le_bytes();
     bytes[0..3].copy_from_slice(&clock[..3]);
-    bytes[3] = u8::from(timing.preferred) << 7;
+    let byte3 = timing.aspect_ratio.nibble()
+        | (u8::from(timing.interlaced) << 4)
+        | (timing.stereo_3d.bits() << 5)
+        | (u8::from(timing.preferred || timing.ycbcr420) << 7);
+    bytes[3] = byte3;
     bytes[4..6].copy_from_slice(&h_active.to_le_bytes());
     bytes[6..8].copy_from_slice(&h_blank.to_le_bytes());
     bytes[8..10]
@@ -1372,12 +1579,15 @@ fn decode_detailed_timings(
             multiple: 20,
         });
     }
+    let block_revision = block.revision & 0x07;
     let mut timings = Vec::with_capacity(block.payload.len() / 20);
     for bytes in block.payload.as_chunks::<20>().0 {
         let pixel_clock = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) + 1;
         let hsync = u16::from_le_bytes([bytes[8], bytes[9]]);
         let vsync = u16::from_le_bytes([bytes[16], bytes[17]]);
         let clock_multiplier = if type_one { 10 } else { 1 };
+        let byte3 = bytes[3];
+        let bit7 = byte3 & 0x80 != 0;
         timings.push(DisplayIdDetailedTiming {
             pixel_clock_khz: pixel_clock * clock_multiplier,
             h_active: u16::from_le_bytes([bytes[4], bytes[5]]) as u32 + 1,
@@ -1390,7 +1600,11 @@ fn decode_detailed_timings(
             v_sync_width: u16::from_le_bytes([bytes[18], bytes[19]]) as u32 + 1,
             h_sync_positive: hsync & 0x8000 != 0,
             v_sync_positive: vsync & 0x8000 != 0,
-            preferred: bytes[3] & 0x80 != 0,
+            aspect_ratio: DisplayIdAspectRatio::from_nibble(byte3 & 0x0F),
+            interlaced: byte3 & 0x10 != 0,
+            stereo_3d: DisplayIdStereo3d::from_bits((byte3 >> 5) & 0x03),
+            preferred: block_revision < 2 && bit7,
+            ycbcr420: block_revision >= 2 && bit7,
         });
     }
     Ok(timings)
@@ -1467,6 +1681,64 @@ fn decode_dynamic_video_timing_range(
         min_vfreq_hz,
         max_vfreq_hz,
         seamless_dynamic_video_timing,
+        raw: block.payload.clone(),
+    })
+}
+
+fn decode_video_timing_range_limits(
+    block: &DisplayIdDataBlock,
+) -> Result<DisplayIdVideoTimingRangeLimits, ExtensionError> {
+    if block.payload.len() != 15 {
+        return Err(ExtensionError::InvalidDisplayIdDataBlockLength {
+            tag: block.tag,
+            length: block.payload.len(),
+            minimum: 15,
+            multiple: 15,
+        });
+    }
+    let bytes = &block.payload;
+    let min_pixel_clock_khz = (u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) + 1) * 10;
+    let max_pixel_clock_khz = (u32::from_le_bytes([bytes[3], bytes[4], bytes[5], 0]) + 1) * 10;
+    let min_hfreq_khz = bytes[6];
+    let max_hfreq_khz = bytes[7];
+    let min_h_blanking = u16::from_le_bytes([bytes[8], bytes[9]]);
+    let min_vfreq_hz = bytes[10];
+    let max_vfreq_hz = bytes[11];
+    let min_v_blanking = u16::from_le_bytes([bytes[12], bytes[13]]);
+    let flags = bytes[14];
+
+    if min_pixel_clock_khz > max_pixel_clock_khz {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "min pixel clock exceeds max pixel clock",
+        });
+    }
+    if min_hfreq_khz > max_hfreq_khz {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "min horizontal frequency exceeds max",
+        });
+    }
+    if min_vfreq_hz == 0 || max_vfreq_hz == 0 || min_vfreq_hz > max_vfreq_hz {
+        return Err(ExtensionError::InvalidDisplayIdDynamicRange {
+            tag: block.tag,
+            reason: "min refresh rate exceeds max refresh rate or is zero",
+        });
+    }
+
+    Ok(DisplayIdVideoTimingRangeLimits {
+        min_pixel_clock_khz,
+        max_pixel_clock_khz,
+        min_hfreq_khz,
+        max_hfreq_khz,
+        min_h_blanking,
+        min_vfreq_hz,
+        max_vfreq_hz,
+        min_v_blanking,
+        supports_interlaced: flags & 0x80 != 0,
+        supports_cvt: flags & 0x40 != 0,
+        supports_cvt_reduced_blanking: flags & 0x20 != 0,
+        discrete_frequency: flags & 0x10 != 0,
         raw: block.payload.clone(),
     })
 }
@@ -2180,6 +2452,20 @@ impl EdidBlock {
         Ok(ranges)
     }
 
+    /// Read all 1.x Video Timing Range Limits from DisplayID extension blocks.
+    pub fn display_id_video_timing_range_limits(
+        &self,
+    ) -> Result<Vec<DisplayIdVideoTimingRangeLimits>, ExtensionError> {
+        let blocks = self.display_id_data_blocks()?;
+        let mut ranges = Vec::new();
+        for block in blocks {
+            if let DisplayIdDataBlockView::VideoTimingRange1x { range } = block.view()? {
+                ranges.push(range);
+            }
+        }
+        Ok(ranges)
+    }
+
     /// Read all Display Interface Features from DisplayID extension blocks.
     pub fn display_id_interface_features(
         &self,
@@ -2505,11 +2791,11 @@ mod tests {
     use super::{
         CtaAdaptiveSync, CtaAudioDescriptor, CtaAudioFormat, CtaColorimetry, CtaDataBlock,
         CtaDataBlockView, CtaExtendedDataBlockView, CtaSpeakerAllocation, CtaVendorSpecificBlock,
-        CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdDataBlock,
+        CtaVideoCapability, CtaVideoMode, CtaY420Support, DisplayIdAspectRatio, DisplayIdDataBlock,
         DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDisplayParameters,
         DisplayIdDynamicVideoTimingRange, DisplayIdFormulaTiming, DisplayIdHeader,
-        DisplayIdInterfaceFeatures, DisplayIdProductIdentification, DisplayIdTiledDisplayTopology,
-        ExtensionError, ExtensionKind, ExtensionWriteError,
+        DisplayIdInterfaceFeatures, DisplayIdProductIdentification, DisplayIdStereo3d,
+        DisplayIdTiledDisplayTopology, ExtensionError, ExtensionKind, ExtensionWriteError,
     };
     use crate::edid::EdidBlock;
 
@@ -3011,6 +3297,95 @@ mod tests {
             invalid_vfreq.view(),
             Err(ExtensionError::InvalidDisplayIdDynamicRange { .. })
         ));
+    }
+
+    #[test]
+    fn display_id_video_timing_range_limits_1x_roundtrip() {
+        // Tag 0x09 (1.x) fixed 15-byte payload:
+        // 148,500 kHz min/max (10 kHz units -> 14849 => 0x3A01), hfreq 30..100 kHz,
+        // min h-blank 160, vfreq 48..165 Hz, min v-blank 3, flags 0xF0.
+        let payload = vec![
+            0x01, 0x3A, 0x00, // min pixel clock (10 kHz units)
+            0x01, 0x3A, 0x00, // max pixel clock (10 kHz units)
+            30,   // min hfreq
+            100,  // max hfreq
+            0xA0, 0x00, // min h blanking
+            48,   // min vfreq
+            165,  // max vfreq
+            0x03, 0x00, // min v blanking
+            0xF0, // flags: interlaced | CVT | CVT-RB | discrete
+        ];
+        let block = DisplayIdDataBlock {
+            tag: 0x09,
+            revision: 0,
+            payload: payload.clone(),
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::VideoTimingRange1x { range } = &view else {
+            panic!("expected VideoTimingRange1x view");
+        };
+        assert_eq!(range.min_pixel_clock_khz, 148_500);
+        assert_eq!(range.max_pixel_clock_khz, 148_500);
+        assert_eq!(range.min_hfreq_khz, 30);
+        assert_eq!(range.max_hfreq_khz, 100);
+        assert_eq!(range.min_h_blanking, 160);
+        assert_eq!(range.min_vfreq_hz, 48);
+        assert_eq!(range.max_vfreq_hz, 165);
+        assert_eq!(range.min_v_blanking, 3);
+        assert!(range.supports_interlaced);
+        assert!(range.supports_cvt);
+        assert!(range.supports_cvt_reduced_blanking);
+        assert!(range.discrete_frequency);
+        assert_eq!(range.raw, payload);
+
+        // Lossless round-trip.
+        let encoded = view.to_data_block().unwrap();
+        assert_eq!(encoded.tag, 0x09);
+        assert_eq!(encoded, block);
+
+        // Reject non-multiple-of-10 kHz clock on encode.
+        let mut invalid = range.clone();
+        invalid.min_pixel_clock_khz = 148_505;
+        let bad_view = DisplayIdDataBlockView::VideoTimingRange1x { range: invalid };
+        assert!(matches!(
+            bad_view.to_data_block_with_tag(0x09),
+            Err(ExtensionWriteError::InvalidDisplayIdDynamicRange { .. })
+        ));
+
+        // Reject a payload that is not exactly 15 bytes.
+        let short = DisplayIdDataBlock {
+            tag: 0x09,
+            revision: 0,
+            payload: vec![0; 14],
+        };
+        assert!(matches!(
+            short.view(),
+            Err(ExtensionError::InvalidDisplayIdDataBlockLength { tag: 0x09, .. })
+        ));
+    }
+
+    #[test]
+    fn display_id_type_iv_enumerated_timing_roundtrip() {
+        // Tag 0x06 (1.x Type IV) shares the DMT/VIC/HDMI-VIC structure of 0x23.
+        // revision 0x40 = code_type 1 (CTA VIC), 1-byte codes.
+        let block = DisplayIdDataBlock {
+            tag: 0x06,
+            revision: 0x40,
+            payload: vec![16], // VIC 16 (1920x1080p60)
+        };
+        let view = block.view().unwrap();
+        assert_eq!(
+            view,
+            DisplayIdDataBlockView::EnumeratedTiming {
+                code_type: 1,
+                code_size: 1,
+                codes: vec![16],
+            }
+        );
+        let encoded = view.to_data_block_with_tag(0x06).unwrap();
+        assert_eq!(encoded.tag, 0x06);
+        assert_eq!(encoded.revision, 0x40);
+        assert_eq!(encoded.payload, vec![16]);
     }
 
     #[test]
@@ -3559,7 +3934,11 @@ mod tests {
                     v_sync_width: 6,
                     h_sync_positive: true,
                     v_sync_positive: true,
+                    aspect_ratio: DisplayIdAspectRatio::OneToOne,
+                    interlaced: false,
+                    stereo_3d: DisplayIdStereo3d::Mono,
                     preferred: true,
+                    ycbcr420: false,
                 }]
             }
         );
@@ -3644,10 +4023,88 @@ mod tests {
                     v_sync_width: 1,
                     h_sync_positive: false,
                     v_sync_positive: false,
+                    aspect_ratio: DisplayIdAspectRatio::OneToOne,
+                    interlaced: false,
+                    stereo_3d: DisplayIdStereo3d::Mono,
                     preferred: false,
+                    ycbcr420: false,
                 }]
             }
         );
+    }
+
+    #[test]
+    fn type_1_7_timing_preserves_byte3_field_semantics() {
+        // Tag 0x22, revision 1: byte 3 bit 7 means "preferred".
+        // byte3 = 0xB6 = aspect 6 (64:27) | interlaced (0x10) | 3D stereo (0x20) | preferred (0x80).
+        let block = DisplayIdDataBlock {
+            tag: 0x22,
+            revision: 1,
+            payload: {
+                let mut p = vec![0u8; 20];
+                p[3] = 0xB6;
+                p
+            },
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::DetailedTiming { timings } = &view else {
+            panic!("expected detailed timing view");
+        };
+        assert_eq!(timings.len(), 1);
+        assert_eq!(
+            timings[0].aspect_ratio,
+            DisplayIdAspectRatio::SixtyFourToTwentySeven
+        );
+        assert!(timings[0].interlaced);
+        assert_eq!(timings[0].stereo_3d, DisplayIdStereo3d::Stereo3d);
+        assert!(timings[0].preferred);
+        assert!(!timings[0].ycbcr420);
+
+        // Re-encoding a revision<2 block reproduces byte 3 exactly.
+        let encoded = view.to_data_block_with_tag(0x22).unwrap();
+        assert_eq!(encoded.payload[3], 0xB6);
+
+        // Same payload in a revision>=2 block: bit 7 means YCbCr 4:2:0, not preferred.
+        let block_r2 = DisplayIdDataBlock {
+            tag: 0x22,
+            revision: 2,
+            payload: {
+                let mut p = vec![0u8; 20];
+                p[3] = 0xB6;
+                p
+            },
+        };
+        let view_r2 = block_r2.view().unwrap();
+        let DisplayIdDataBlockView::DetailedTiming { timings } = &view_r2 else {
+            panic!("expected detailed timing view");
+        };
+        assert!(!timings[0].preferred);
+        assert!(timings[0].ycbcr420);
+        let encoded_r2 = view_r2.to_data_block_with_tag(0x22).unwrap();
+        assert_eq!(encoded_r2.payload[3], 0xB6);
+    }
+
+    #[test]
+    fn type_1_7_timing_preserves_reserved_aspect_and_stereo_values() {
+        // Reserved aspect (0xA = 10) and reserved stereo (0x3) round-trip verbatim.
+        let block = DisplayIdDataBlock {
+            tag: 0x03,
+            revision: 0,
+            payload: {
+                let mut p = vec![0u8; 20];
+                // aspect=0xA, stereo=0x3 (bit 6:5 => 0x60)
+                p[3] = 0x60 | 0x0A;
+                p
+            },
+        };
+        let view = block.view().unwrap();
+        let DisplayIdDataBlockView::DetailedTiming { timings } = &view else {
+            panic!("expected detailed timing view");
+        };
+        assert_eq!(timings[0].aspect_ratio, DisplayIdAspectRatio::Reserved(10));
+        assert_eq!(timings[0].stereo_3d, DisplayIdStereo3d::Reserved);
+        let encoded = view.to_data_block_with_tag(0x03).unwrap();
+        assert_eq!(encoded.payload[3], 0x6A);
     }
 
     #[test]
@@ -4758,7 +5215,11 @@ mod tests {
             v_sync_width: 6,
             h_sync_positive: true,
             v_sync_positive: true,
+            aspect_ratio: DisplayIdAspectRatio::OneToOne,
+            interlaced: false,
+            stereo_3d: DisplayIdStereo3d::Mono,
             preferred: false,
+            ycbcr420: false,
         };
         let view = DisplayIdDataBlockView::DetailedTiming {
             timings: vec![timing; 7],

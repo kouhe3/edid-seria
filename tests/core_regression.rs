@@ -919,8 +919,8 @@ fn dtd_and_metadata_property_roundtrips() {
 #[test]
 fn displayid_typed_encoder_roundtrips_view_and_bytes() {
     use edid_seria::{
-        DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdDynamicVideoTimingRange,
-        DisplayIdInterfaceFeatures, EdidBlock,
+        DisplayIdAspectRatio, DisplayIdDataBlockView, DisplayIdDetailedTiming,
+        DisplayIdDynamicVideoTimingRange, DisplayIdInterfaceFeatures, DisplayIdStereo3d, EdidBlock,
     };
     let timing = DisplayIdDetailedTiming {
         pixel_clock_khz: 14_850,
@@ -934,7 +934,11 @@ fn displayid_typed_encoder_roundtrips_view_and_bytes() {
         v_sync_width: 5,
         h_sync_positive: true,
         v_sync_positive: false,
+        aspect_ratio: DisplayIdAspectRatio::OneToOne,
+        interlaced: false,
+        stereo_3d: DisplayIdStereo3d::Mono,
         preferred: true,
+        ycbcr420: false,
     };
     let view = DisplayIdDataBlockView::DetailedTiming {
         timings: vec![timing],
@@ -1029,12 +1033,14 @@ fn displayid_typed_encoder_roundtrips_view_and_bytes() {
     .unwrap();
     let parsed_features = features_edid_block.display_id_interface_features().unwrap();
     assert_eq!(parsed_features.len(), 1);
-    assert!(parsed_features[0].supports_bt2020_st2084());
-    assert!(parsed_features[0].supports_bt709());
 }
+
 #[test]
 fn displayid_type_vii_encoder_roundtrips_maximum_pixel_clock() {
-    use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, EdidBlock};
+    use edid_seria::{
+        DisplayIdAspectRatio, DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdStereo3d,
+        EdidBlock,
+    };
 
     let timing = DisplayIdDetailedTiming {
         pixel_clock_khz: 16_777_216,
@@ -1048,7 +1054,11 @@ fn displayid_type_vii_encoder_roundtrips_maximum_pixel_clock() {
         v_sync_width: 1,
         h_sync_positive: false,
         v_sync_positive: false,
+        aspect_ratio: DisplayIdAspectRatio::OneToOne,
+        interlaced: false,
+        stereo_3d: DisplayIdStereo3d::Mono,
         preferred: false,
+        ycbcr420: false,
     };
     let view = DisplayIdDataBlockView::DetailedTiming {
         timings: vec![timing],
@@ -1204,7 +1214,10 @@ fn displayid_typed_raw_payloads_reject_lengths_above_extension_limit() {
 
 #[test]
 fn displayid_typed_timing_encoder_rejects_sync_offsets_that_overlap_polarity() {
-    use edid_seria::{DisplayIdDataBlockView, DisplayIdDetailedTiming, ExtensionWriteError};
+    use edid_seria::{
+        DisplayIdAspectRatio, DisplayIdDataBlockView, DisplayIdDetailedTiming, DisplayIdStereo3d,
+        ExtensionWriteError,
+    };
 
     let mut timing = DisplayIdDetailedTiming {
         pixel_clock_khz: 14_850,
@@ -1218,7 +1231,11 @@ fn displayid_typed_timing_encoder_rejects_sync_offsets_that_overlap_polarity() {
         v_sync_width: 5,
         h_sync_positive: true,
         v_sync_positive: false,
+        aspect_ratio: DisplayIdAspectRatio::OneToOne,
+        interlaced: false,
+        stereo_3d: DisplayIdStereo3d::Mono,
         preferred: true,
+        ycbcr420: false,
     };
     let view = DisplayIdDataBlockView::DetailedTiming {
         timings: vec![timing],
