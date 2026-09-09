@@ -1,3 +1,5 @@
+#### AI SLOP WARNING. 100% VIBE
+
 # edid-seria
 [![CI](https://img.shields.io/github/actions/workflow/status/kouhe3/edid-seria/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/kouhe3/edid-seria/actions/workflows/ci.yml) [![Crates.io](https://img.shields.io/crates/v/edid-seria?style=flat-square)](https://crates.io/crates/edid-seria) [![docs.rs](https://img.shields.io/docsrs/edid-seria?style=flat-square)](https://docs.rs/edid-seria) [![MSRV](https://img.shields.io/badge/MSRV-1.95-blue?style=flat-square)](https://github.com/kouhe3/edid-seria) [![License](https://img.shields.io/badge/license-Unlicense-blue?style=flat-square)](#license)
 
